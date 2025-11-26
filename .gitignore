@@ -1,0 +1,111 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+backend/.env
+flaskServer/.env
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv/
+myenv/
+flaskServer/venv/
+flaskServer/env/
+flaskServer/myenv/
+flaskServer/.venv/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# FlaskServer specific
+flaskServer/__pycache__/
+flaskServer/*.pyc
+flaskServer/*.pyo
+flaskServer/*.pyd
+flaskServer/.pytest_cache/
+flaskServer/.mypy_cache/
+flaskServer/.ruff_cache/
+
+# Uploads and generated files
+backend/uploads/
+backend/uploads/**/*
+backend/static/
+flaskServer/temp_face.jpg
+flaskServer/runs/
+flaskServer/*.pt
+flaskServer/**/*.pth
+flaskServer/**/*.caffemodel
+flaskServer/*.csv
+flaskServer/encoded-images-data.csv
+flaskServer/classifier.pkl
+flaskServer/labels.pkl
+
+# Generated and user-uploaded images (keep frontend assets)
+# Detection snapshots and saved detections
+flaskServer/detection_snapshots/
+flaskServer/saved_detections/
+# Training datasets (entire directory - contains thousands of images, labels, cache files)
+flaskServer/datasets/
+# Dataset zip files
+flaskServer/*.zip
+flaskServer/datasets/*.zip
+# User uploaded images (already covered by backend/uploads/ but explicit for clarity)
+backend/uploads/**/*.jpg
+backend/uploads/**/*.jpeg
+backend/uploads/**/*.png
+backend/uploads/**/*.gif
+backend/uploads/**/*.webp
+# Keep frontend application assets
+!frontend/public/**/*.png
+!frontend/public/**/*.svg
+!frontend/src/assets/**/*.png
+!frontend/src/assets/**/*.svg
+
+# Documentation files (ignore all README files except main README.md)
+README*.md
+**/README*.md
+!README.md
+README*.txt
+**/README*.txt
+
+# IDE and OS
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

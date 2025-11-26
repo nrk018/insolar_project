@@ -1,0 +1,112 @@
+/* Custom Calendar Styles */
+.react-calendar {
+    width: 50%;
+    background: white;
+    padding: 10px;
+    border: none;
+    font-family: "Open Sans", serif;
+    border-radius: 8px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+    transition: transform 0.3s ease-in-out;
+}
+
+/* Improve Navigation Transition */
+.react-calendar.fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Customize Weekday Headers */
+.react-calendar__month-view__weekdays__weekday > abbr {
+    text-transform: uppercase;
+    font-weight: bold;
+    color: black;
+    font-size: 0.8rem;
+    text-decoration: none;
+}
+
+/* Weekend Highlight */
+.react-calendar__month-view__days__day--weekend {
+    color: #d9534f; /* Soft red */
+    font-weight: bold;
+    background: #fef2f2; /* Light red */
+    border-radius: 6px;
+}
+
+.react-calendar__tile {
+    font-weight: bold;
+    position: relative;
+    top: 0;
+    left: 0;
+}
+
+.react-calendar__month-view__days__day--neighboringMonth {
+    color: #9d9d9d;
+}
+
+/* Hover Effect */
+.react-calendar__tile:hover {
+    background: #f1f1f1;
+    border-radius: 10px;
+    transition: background 0.2s ease-in-out;
+}
+
+/* Date Selection - Smooth Highlighting */
+.react-calendar__tile--active {
+    background: linear-gradient(135deg, #0064a2, #00416A) !important;
+    color: white !important;
+    border-radius: 10px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+    transition: 0.3s;
+}
+
+/* Navigation Buttons */
+.react-calendar__navigation__label__labelText {
+    font-size: 1.2rem;
+    color: black;
+    font-weight: 700;
+    font-family: "Montserrat", serif;
+}
+
+/* Attendance Dots */
+.attendance-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    position: absolute;
+    bottom: 1.5rem;
+    right: 0.5rem;
+}
+
+/* Attendance Status Colors */
+.dot-present {
+    background: #4CAF50; /* Green */
+}
+
+.dot-late {
+    background: #FFC107; /* Yellow */
+}
+
+.dot-absent {
+    background: #FF3B3B; /* Red */
+}
+
+/* Background Color for Selected Dates Based on Attendance */
+.status-present .react-calendar__tile--active {
+    background: #4CAF50 !important;
+    color: white !important;
+}
+
+.status-late .react-calendar__tile--active {
+    background: #FFC107 !important;
+    color: black !important;
+}
+
+.status-absent .react-calendar__tile--active {
+    background: #FF3B3B !important;
+    color: white !important;
+}
