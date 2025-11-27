@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-# Environment variables
+# Environment variables (contain secrets - should NOT be tracked)
 .env
 .env.local
 .env.*.local
@@ -61,38 +61,28 @@ flaskServer/.pytest_cache/
 flaskServer/.mypy_cache/
 flaskServer/.ruff_cache/
 
-# Uploads and generated files
+# User uploaded images (keep dataset images ignored)
 backend/uploads/
 backend/uploads/**/*
-backend/static/
-flaskServer/temp_face.jpg
-flaskServer/runs/
-flaskServer/*.pt
-# model files
-flaskServer/**/*.pth
-flaskServer/**/*.caffemodel
-# face anti-spoofing
-!flaskServer/Silent-Face-Anti-Spoofing/resources/**/*.pth
-!flaskServer/Silent-Face-Anti-Spoofing/resources/**/*.caffemodel
-flaskServer/*.csv
-flaskServer/encoded-images-data.csv
-flaskServer/classifier.pkl
-flaskServer/labels.pkl
-
-
-flaskServer/detection_snapshots/
-flaskServer/saved_detections/
-# Training datasets (entire directory - contains thousands of images, labels, cache files)
-flaskServer/datasets/
-# Dataset zip files
-flaskServer/*.zip
-flaskServer/datasets/*.zip
-# User uploaded images (already covered by backend/uploads/ but explicit for clarity)
 backend/uploads/**/*.jpg
 backend/uploads/**/*.jpeg
 backend/uploads/**/*.png
 backend/uploads/**/*.gif
 backend/uploads/**/*.webp
+backend/static/
+flaskServer/temp_face.jpg
+
+# Detection snapshots and saved detections (generated at runtime)
+flaskServer/detection_snapshots/
+flaskServer/saved_detections/
+
+# Training datasets (entire directory - contains thousands of images, labels, cache files)
+flaskServer/datasets/
+flaskServer/datasets/**/*
+# Dataset zip files
+flaskServer/*.zip
+flaskServer/datasets/*.zip
+
 # Keep frontend application assets
 !frontend/public/**/*.png
 !frontend/public/**/*.svg
