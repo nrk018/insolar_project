@@ -572,6 +572,120 @@ app.get("/api/admin/employees", authenticateToken, async (req, res) => {
     }
 });
 
+// ✅ Admin: Delete Employee (with self-deletion prevention)
+app.delete("/api/admin/employees/:employeeId", authenticateToken, async (req, res) => {
+    try {
+        // Check if user is admin
+        if (!req.user) {
+            return res.status(403).json({ error: "Forbidden: Admin access required" });
+        }
+        
+        const userDesignation = req.user.designation?.toString().toLowerCase().trim();
+        if (userDesignation !== "admin") {
+            return res.status(403).json({ error: "Forbidden: Admin access required" });
+        }
+
+        const { employeeId } = req.params;
+        
+        if (!employeeId) {
+            return res.status(400).json({ error: "Employee ID is required" });
+        }
+
+        // Get current admin user details from database
+        const { data: currentUser, error: currentUserError } = await supabase
+            .from("users")
+            .select("email, employee_id, name")
+            .eq("email", req.user.email)
+            .limit(1);
+
+        if (currentUserError || !currentUser || currentUser.length === 0) {
+            return res.status(500).json({ error: "Failed to verify current user" });
+        }
+
+        // Get employee to be deleted
+        const { data: employeeToDelete, error: findError } = await supabase
+            .from("users")
+            .select("employee_id, email, name, designation")
+            .eq("employee_id", employeeId)
+            .limit(1);
+
+        if (findError) {
+            console.error("Error finding employee:", findError);
+            return res.status(500).json({ error: "Failed to find employee", details: findError.message });
+        }
+
+        if (!employeeToDelete || employeeToDelete.length === 0) {
+            return res.status(404).json({ error: "Employee not found" });
+        }
+
+        const employee = employeeToDelete[0];
+
+        // Prevent admin from deleting themselves
+        if (employee.email === currentUser[0].email || employee.employee_id === currentUser[0].employee_id) {
+            return res.status(400).json({ 
+                error: "Cannot delete your own account. Please ask another admin to delete your account." 
+            });
+        }
+
+        // Delete employee's uploaded images folder
+        const employeeUploadFolder = path.join(__dirname, "uploads", employee.name);
+        if (fs.existsSync(employeeUploadFolder)) {
+            try {
+                fs.rmSync(employeeUploadFolder, { recursive: true, force: true });
+                console.log(`[DELETE EMPLOYEE] Deleted upload folder: ${employeeUploadFolder}`);
+            } catch (folderError) {
+                console.error(`[DELETE EMPLOYEE] Error deleting folder: ${folderError}`);
+            }
+        }
+
+        // Delete from worker_details table (PPE system)
+        const workerId = `W${String(employee.employee_id).padStart(3, "0")}`;
+        try {
+            const { error: workerDeleteError } = await supabase
+                .from("worker_details")
+                .delete()
+                .eq("worker_id", workerId);
+            
+            if (workerDeleteError) {
+                console.error(`[DELETE EMPLOYEE] Error deleting worker_details: ${workerDeleteError}`);
+            }
+        } catch (workerError) {
+            console.error(`[DELETE EMPLOYEE] Error deleting worker_details: ${workerError}`);
+        }
+
+        // Delete from detection_events table
+        try {
+            const { error: detectionDeleteError } = await supabase
+                .from("detection_events")
+                .delete()
+                .eq("worker_name", employee.name);
+            
+            if (detectionDeleteError) {
+                console.error(`[DELETE EMPLOYEE] Error deleting detection_events: ${detectionDeleteError}`);
+            }
+        } catch (detectionError) {
+            console.error(`[DELETE EMPLOYEE] Error deleting detection_events: ${detectionError}`);
+        }
+
+        // Delete from users table
+        const { error: deleteError } = await supabase
+            .from("users")
+            .delete()
+            .eq("employee_id", employeeId);
+
+        if (deleteError) {
+            console.error("Error deleting employee:", deleteError);
+            return res.status(500).json({ error: "Failed to delete employee", details: deleteError.message });
+        }
+
+        console.log(`[DELETE EMPLOYEE] Successfully deleted employee: ${employee.name} (${employee.employee_id})`);
+        return res.status(200).json({ message: "Employee deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting employee:", error);
+        return res.status(500).json({ error: "Internal Server Error", details: error.message });
+    }
+});
+
 // User login
 app.post("/login", async (req, res) => {
     try {

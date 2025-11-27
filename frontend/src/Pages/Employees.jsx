@@ -6,10 +6,22 @@ const Employees = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
 
   useEffect(() => {
     fetchEmployees();
+    fetchCurrentUser();
   }, []);
+
+  const fetchCurrentUser = async () => {
+    try {
+      const response = await axios.get('/api/user');
+      setCurrentUser(response.data);
+    } catch (err) {
+      console.error("Error fetching current user:", err);
+    }
+  };
 
   const fetchEmployees = async () => {
     try {
@@ -30,6 +42,29 @@ const Employees = () => {
     return imageName.split('_')[0];
   };
 
+  const handleDelete = async (employeeId, employeeName) => {
+    if (!window.confirm(`Are you sure you want to delete ${employeeName}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      setDeletingId(employeeId);
+      const response = await axios.delete(`/api/admin/employees/${employeeId}`);
+      
+      if (response.data.message) {
+        // Remove from local state
+        setEmployees(employees.filter(emp => emp.employee_id !== employeeId));
+        alert('Employee deleted successfully');
+      }
+    } catch (err) {
+      const errorMessage = err.response?.data?.error || 'Failed to delete employee';
+      alert(errorMessage);
+      console.error("Error deleting employee:", err);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const filteredEmployees = employees.filter(emp => {
     const searchLower = searchTerm.toLowerCase();
     return (
@@ -40,6 +75,11 @@ const Employees = () => {
       emp.designation?.toLowerCase().includes(searchLower)
     );
   });
+
+  const isCurrentUser = (employee) => {
+    if (!currentUser) return false;
+    return employee.email === currentUser.email || employee.employee_id === currentUser.employee_id;
+  };
 
   if (loading) {
     return (
@@ -108,13 +148,16 @@ const Employees = () => {
                 <th className="h-12 px-4 text-left text-xs font-medium text-muted-foreground">
                   Designation
                 </th>
+                <th className="h-12 px-4 text-left text-xs font-medium text-muted-foreground">
+                  Actions
+                </th>
               </tr>
             </thead>
             <tbody>
               {filteredEmployees.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="p-8 text-center text-sm text-muted-foreground"
                   >
                     {searchTerm ? "No employees found matching your search." : "No employees found."}
@@ -154,6 +197,21 @@ const Employees = () => {
                     <td className="p-4 text-sm">{emp.phone || "—"}</td>
                     <td className="p-4 text-sm">{emp.department || "—"}</td>
                     <td className="p-4 text-sm">{emp.designation || "—"}</td>
+                    <td className="p-4">
+                      {isCurrentUser(emp) ? (
+                        <span className="text-xs text-muted-foreground italic">
+                          Cannot delete own account
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleDelete(emp.employee_id, emp.name)}
+                          disabled={deletingId === emp.employee_id}
+                          className="px-3 py-1.5 text-xs font-medium text-white bg-destructive hover:bg-destructive/90 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {deletingId === emp.employee_id ? 'Deleting...' : 'Delete'}
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))
               )}
