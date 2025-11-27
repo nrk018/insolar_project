@@ -140,21 +140,60 @@ app.post("/register", upload.array("profilePhotos"), async (req, res) => {
         res.status(201).json({ message: "Registration Successful", designation: designation });
 
         // ✅ Trigger embeddings generation (keep this code AFTER successful registration)
-        const scriptPath = path.join(__dirname, "../flaskServer/createEmbeddings.py");
-        const uploadFolder = path.join(__dirname, "uploads", name);
-
-        const command = `python "${scriptPath}" "${uploadFolder}"`;
-
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`[Embedding Error]: ${error.message}`);
-                return;
+        if (profilePhotos.length > 0) {
+            const scriptPath = path.join(__dirname, "../flaskServer/createEmbeddings.py");
+            const uploadFolder = path.join(__dirname, "uploads", name);
+            
+            // Determine Python command - try virtual environment first, then system Python
+            let pythonCmd;
+            const venvPython = process.platform === 'win32' 
+                ? path.join(__dirname, "../flaskServer/myenv/Scripts/python.exe")
+                : path.join(__dirname, "../flaskServer/myenv/bin/python3");
+            
+            if (fs.existsSync(venvPython)) {
+                pythonCmd = venvPython;
+            } else {
+                pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
             }
-            if (stderr) {
-                console.error(`[Embedding stderr]: ${stderr}`);
-            }
-            console.log(`[Embeddings Log]: ${stdout}`);
-        });
+            
+            const command = `"${pythonCmd}" "${scriptPath}" "${uploadFolder}"`;
+
+            console.log(`[EMBEDDINGS] Starting embedding generation for: ${name}`);
+            console.log(`[EMBEDDINGS] Command: ${command}`);
+
+            // Use exec with promise to wait for completion
+            await new Promise((resolve) => {
+                exec(command, { 
+                    cwd: path.join(__dirname, "../flaskServer"),
+                    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+                    maxBuffer: 10 * 1024 * 1024
+                }, (error, stdout, stderr) => {
+                    if (error) {
+                        console.error(`[EMBEDDINGS ERROR] Command failed: ${error.message}`);
+                        console.error(`[EMBEDDINGS ERROR] Exit code: ${error.code}`);
+                        if (stderr) {
+                            console.error(`[EMBEDDINGS ERROR] stderr: ${stderr}`);
+                        }
+                    }
+                    if (stderr && !error) {
+                        console.warn(`[EMBEDDINGS WARNING] stderr: ${stderr}`);
+                    }
+                    if (stdout) {
+                        console.log(`[EMBEDDINGS OUTPUT]: ${stdout}`);
+                    }
+                    
+                    // Check if embeddings.csv was created
+                    const embeddingsPath = path.join(uploadFolder, 'embeddings.csv');
+                    if (fs.existsSync(embeddingsPath)) {
+                        console.log(`[EMBEDDINGS SUCCESS] Embeddings file created: ${embeddingsPath}`);
+                    } else {
+                        console.error(`[EMBEDDINGS ERROR] Embeddings file NOT created at: ${embeddingsPath}`);
+                    }
+                    
+                    resolve();
+                });
+            });
+        }
     } catch (error) {
         console.error("Error in registration", error);
         res.status(500).json({ error: "Internal Server Error" });
@@ -314,17 +353,77 @@ app.post("/api/admin/add-employee", authenticateToken, upload.array("profilePhot
         if (profilePhotos.length > 0) {
             const scriptPath = path.join(__dirname, "../flaskServer/createEmbeddings.py");
             const uploadFolder = path.join(__dirname, "uploads", name);
-            const command = `python "${scriptPath}" "${uploadFolder}"`;
+            
+            // Determine Python command - try virtual environment first, then system Python
+            let pythonCmd;
+            const venvPython = process.platform === 'win32' 
+                ? path.join(__dirname, "../flaskServer/myenv/Scripts/python.exe")
+                : path.join(__dirname, "../flaskServer/myenv/bin/python3");
+            
+            if (fs.existsSync(venvPython)) {
+                pythonCmd = venvPython;
+                console.log(`[EMBEDDINGS] Using virtual environment Python: ${pythonCmd}`);
+            } else {
+                pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+                console.log(`[EMBEDDINGS] Using system Python: ${pythonCmd}`);
+            }
+            
+            const command = `"${pythonCmd}" "${scriptPath}" "${uploadFolder}"`;
 
-            exec(command, (error, stdout, stderr) => {
-                if (error) {
-                    console.error(`[Embedding Error]: ${error.message}`);
-                }
-                if (stderr) {
-                    console.error(`[Embedding stderr]: ${stderr}`);
-                }
-                console.log(`[Embeddings Log]: ${stdout}`);
+            console.log(`[EMBEDDINGS] Starting embedding generation for: ${name}`);
+            console.log(`[EMBEDDINGS] Command: ${command}`);
+            console.log(`[EMBEDDINGS] Upload folder: ${uploadFolder}`);
+            console.log(`[EMBEDDINGS] Script path: ${scriptPath}`);
+            console.log(`[EMBEDDINGS] Folder exists: ${fs.existsSync(uploadFolder)}`);
+            console.log(`[EMBEDDINGS] Script exists: ${fs.existsSync(scriptPath)}`);
+
+            // Verify images exist
+            const imageFiles = fs.readdirSync(uploadFolder).filter(f => 
+                f.toLowerCase().endsWith('.jpg') || 
+                f.toLowerCase().endsWith('.jpeg') || 
+                f.toLowerCase().endsWith('.png')
+            );
+            console.log(`[EMBEDDINGS] Found ${imageFiles.length} image files: ${imageFiles.join(', ')}`);
+
+            // Use exec with promise to wait for completion
+            await new Promise((resolve, reject) => {
+                exec(command, { 
+                    cwd: path.join(__dirname, "../flaskServer"),
+                    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+                    maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+                }, (error, stdout, stderr) => {
+                    if (error) {
+                        console.error(`[EMBEDDINGS ERROR] Command failed: ${error.message}`);
+                        console.error(`[EMBEDDINGS ERROR] Exit code: ${error.code}`);
+                        console.error(`[EMBEDDINGS ERROR] Signal: ${error.signal}`);
+                        if (stderr) {
+                            console.error(`[EMBEDDINGS ERROR] stderr: ${stderr}`);
+                        }
+                    }
+                    if (stderr && !error) {
+                        console.warn(`[EMBEDDINGS WARNING] stderr: ${stderr}`);
+                    }
+                    if (stdout) {
+                        console.log(`[EMBEDDINGS OUTPUT]: ${stdout}`);
+                    }
+                    
+                    // Check if embeddings.csv was created
+                    const embeddingsPath = path.join(uploadFolder, 'embeddings.csv');
+                    if (fs.existsSync(embeddingsPath)) {
+                        const stats = fs.statSync(embeddingsPath);
+                        console.log(`[EMBEDDINGS SUCCESS] Embeddings file created: ${embeddingsPath}`);
+                        console.log(`[EMBEDDINGS SUCCESS] File size: ${stats.size} bytes`);
+                    } else {
+                        console.error(`[EMBEDDINGS ERROR] Embeddings file NOT created at: ${embeddingsPath}`);
+                        console.error(`[EMBEDDINGS ERROR] Please check if Python script ran successfully`);
+                        console.error(`[EMBEDDINGS ERROR] Try running manually: ${command}`);
+                    }
+                    
+                    resolve(); // Always resolve, don't fail the employee addition
+                });
             });
+        } else {
+            console.log(`[EMBEDDINGS] No images uploaded for ${name}, skipping embedding generation`);
         }
 
         return res.status(201).json({
