@@ -68,15 +68,18 @@ backend/static/
 flaskServer/temp_face.jpg
 flaskServer/runs/
 flaskServer/*.pt
+# model files
 flaskServer/**/*.pth
 flaskServer/**/*.caffemodel
+# face anti-spoofing
+!flaskServer/Silent-Face-Anti-Spoofing/resources/**/*.pth
+!flaskServer/Silent-Face-Anti-Spoofing/resources/**/*.caffemodel
 flaskServer/*.csv
 flaskServer/encoded-images-data.csv
 flaskServer/classifier.pkl
 flaskServer/labels.pkl
 
-# Generated and user-uploaded images (keep frontend assets)
-# Detection snapshots and saved detections
+
 flaskServer/detection_snapshots/
 flaskServer/saved_detections/
 # Training datasets (entire directory - contains thousands of images, labels, cache files)
