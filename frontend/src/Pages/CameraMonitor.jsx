@@ -313,19 +313,20 @@ const CameraMonitor = () => {
               
               const timeAgo = getTimeAgo(detectedAt);
               
-              // Format time in local timezone
-              const timeString = detectedAt.toLocaleTimeString('en-US', { 
+              // Format time in India/Delhi timezone (Asia/Kolkata - IST)
+              const timeString = detectedAt.toLocaleTimeString('en-IN', { 
                 hour: '2-digit', 
                 minute: '2-digit', 
                 second: '2-digit',
                 hour12: true,
-                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                timeZone: 'Asia/Kolkata'
               });
               
-              const dateString = detectedAt.toLocaleDateString('en-US', {
+              const dateString = detectedAt.toLocaleDateString('en-IN', {
                 month: 'short',
                 day: 'numeric',
-                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                year: 'numeric',
+                timeZone: 'Asia/Kolkata'
               });
               
               const FLASK_URL = import.meta.env.VITE_FLASK_URL || 'http://localhost:5000';

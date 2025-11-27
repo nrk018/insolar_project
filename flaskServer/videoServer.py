@@ -154,8 +154,8 @@ def is_real_face(frame, box, anti_spoof):
     label = np.argmax(prediction)
     return bool(label == 1)  # Convert to Python bool for JSON serialization
 
-def open_camera(source_type='rtsp', max_retries=3):
-    """Open camera stream (RTSP or webcam) with retry logic"""
+def open_camera(source_type='rtsp', max_retries=5):
+    """Open camera stream (RTSP or webcam) with retry logic and Windows-specific fixes"""
     global camera, camera_source
     with camera_lock:
         if camera is not None:
@@ -166,8 +166,88 @@ def open_camera(source_type='rtsp', max_retries=3):
             try:
                 if source_type == 'rtsp':
                     print(f"[VIDEO SERVER] Attempting RTSP connection (attempt {attempt + 1}/{max_retries})...")
-                    camera = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+                    print(f"[VIDEO SERVER] RTSP URL: {RTSP_URL}")
+                    
+                    # On Windows, try different backends for better RTSP support
+                    if sys.platform == 'win32':
+                        # Try multiple backends on Windows
+                        backends = [
+                            (cv2.CAP_FFMPEG, "FFMPEG"),
+                            (cv2.CAP_ANY, "ANY"),
+                        ]
+                        
+                        for backend_id, backend_name in backends:
+                            try:
+                                print(f"[VIDEO SERVER] Trying backend: {backend_name}")
+                                camera = cv2.VideoCapture(RTSP_URL, backend_id)
+                                
+                                if camera.isOpened():
+                                    # Set timeout properties for Windows RTSP
+                                    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                                    # Give more time for RTSP connection on Windows
+                                    time.sleep(2)
+                                    
+                                    # Try reading a test frame with multiple attempts
+                                    ret = False
+                                    test_frame = None
+                                    for read_attempt in range(5):
+                                        ret, test_frame = camera.read()
+                                        if ret and test_frame is not None and test_frame.size > 0:
+                                            print(f"[VIDEO SERVER] RTSP camera opened successfully with {backend_name} backend!")
+                                            print(f"[VIDEO SERVER] Frame size: {test_frame.shape[1]}x{test_frame.shape[0]}")
+                                            camera_source = 'rtsp'
+                                            return True
+                                        time.sleep(1)
+                                    
+                                    if not ret:
+                                        print(f"[VIDEO SERVER] {backend_name} backend opened but cannot read frames, trying next backend...")
+                                        camera.release()
+                                        camera = None
+                                        continue
+                                else:
+                                    print(f"[VIDEO SERVER] {backend_name} backend failed to open camera")
+                                    if camera:
+                                        camera.release()
+                                        camera = None
+                                    continue
+                                    
+                            except Exception as backend_err:
+                                print(f"[VIDEO SERVER] Error with {backend_name} backend: {backend_err}")
+                                if camera:
+                                    camera.release()
+                                    camera = None
+                                continue
+                        
+                        # If all backends failed, try one more time with default
+                        print(f"[VIDEO SERVER] All backends failed, trying default method...")
+                        camera = cv2.VideoCapture(RTSP_URL)
+                        time.sleep(2)
+                    else:
+                        # On macOS/Linux, use FFMPEG backend
+                        camera = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
+                        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        time.sleep(1)
+                    
                     camera_source = 'rtsp'
+                    
+                    if camera.isOpened():
+                        # Try reading a test frame
+                        ret, test_frame = camera.read()
+                        if ret and test_frame is not None and test_frame.size > 0:
+                            print(f"[VIDEO SERVER] RTSP camera opened successfully!")
+                            print(f"[VIDEO SERVER] Frame size: {test_frame.shape[1]}x{test_frame.shape[0]}")
+                            return True
+                        else:
+                            print(f"[VIDEO SERVER] Camera opened but cannot read frames, retrying...")
+                            if camera:
+                                camera.release()
+                                camera = None
+                    else:
+                        print(f"[VIDEO SERVER] Failed to open RTSP camera")
+                        if camera:
+                            camera.release()
+                            camera = None
+                        
                 else:  # webcam (laptop camera)
                     print(f"[VIDEO SERVER] Attempting laptop camera connection (attempt {attempt + 1}/{max_retries})...")
                     # Try different camera indices (0, 1, 2) in case default doesn't work
@@ -185,45 +265,57 @@ def open_camera(source_type='rtsp', max_retries=3):
                             camera.release()
                             camera = None
                         continue
-                
-                if camera.isOpened():
-                    # Optimize camera settings for lower latency and better performance
-                    camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer to reduce latency
-                    camera.set(cv2.CAP_PROP_FPS, 30)  # Set FPS
-                    # Reduce resolution for better performance (optional - can adjust)
-                    # camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    # camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    time.sleep(0.5)  # Give camera time to initialize
                     
-                    # Try reading a test frame
-                    ret, test_frame = camera.read()
-                    if ret and test_frame is not None and test_frame.size > 0:
-                        print(f"[VIDEO SERVER] Camera opened successfully: {source_type}")
-                        return True
+                    if camera.isOpened():
+                        # Optimize camera settings for lower latency and better performance
+                        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimal buffer to reduce latency
+                        camera.set(cv2.CAP_PROP_FPS, 30)  # Set FPS
+                        time.sleep(0.5)  # Give camera time to initialize
+                        
+                        # Try reading a test frame
+                        ret, test_frame = camera.read()
+                        if ret and test_frame is not None and test_frame.size > 0:
+                            print(f"[VIDEO SERVER] Camera opened successfully: {source_type}")
+                            return True
+                        else:
+                            print(f"[VIDEO SERVER] Camera opened but cannot read frames, retrying...")
+                            if camera:
+                                camera.release()
+                                camera = None
                     else:
-                        print(f"[VIDEO SERVER] Camera opened but cannot read frames, retrying...")
+                        print(f"[VIDEO SERVER] Failed to open camera, retrying...")
                         if camera:
                             camera.release()
                             camera = None
-                else:
-                    print(f"[VIDEO SERVER] Failed to open camera, retrying...")
-                    if camera:
-                        camera.release()
-                        camera = None
                 
                 if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
+                    wait_time = 2 if source_type == 'rtsp' else 1
+                    print(f"[VIDEO SERVER] Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
                     
             except Exception as e:
                 print(f"[VIDEO SERVER] Error opening camera: {e}")
+                import traceback
+                traceback.print_exc()
                 if camera:
                     camera.release()
                     camera = None
                 if attempt < max_retries - 1:
-                    time.sleep(1)
+                    wait_time = 2 if source_type == 'rtsp' else 1
+                    time.sleep(wait_time)
         
         error_msg = f"[VIDEO SERVER] Failed to open {source_type} camera after {max_retries} attempts"
-        if source_type == 'webcam':
+        if source_type == 'rtsp':
+            error_msg += "\n  - Verify RTSP URL is correct and camera is accessible"
+            error_msg += f"\n  - Current RTSP URL: {RTSP_URL}"
+            error_msg += "\n  - Check network connectivity: ping the camera IP"
+            error_msg += "\n  - Verify RTSP port 554 is open"
+            error_msg += "\n  - Test RTSP URL in VLC Media Player to confirm it works"
+            error_msg += "\n  - Check camera credentials (username/password)"
+            if sys.platform == 'win32':
+                error_msg += "\n  - On Windows: Ensure OpenCV was built with FFMPEG support"
+                error_msg += "\n  - Try installing opencv-python-headless or opencv-contrib-python"
+        elif source_type == 'webcam':
             error_msg += "\n  - Make sure laptop camera is available and not in use by another app"
             error_msg += "\n  - Close other apps using the camera (Zoom, Teams, Photo Booth, etc.)"
             if sys.platform == 'darwin':
@@ -599,11 +691,20 @@ def start_camera():
         else:
             error_msg = f"Failed to open {source_type} camera. "
             if source_type == 'rtsp':
-                error_msg += "Check RTSP URL and network connection."
+                error_msg += "Troubleshooting steps:\n"
+                error_msg += f"1. Verify RTSP URL: {RTSP_URL}\n"
+                error_msg += "2. Test camera connectivity: ping the camera IP address\n"
+                error_msg += "3. Test RTSP stream in VLC Media Player\n"
+                error_msg += "4. Check camera credentials (username/password)\n"
+                error_msg += "5. Verify port 554 is open and accessible\n"
+                if sys.platform == 'win32':
+                    error_msg += "6. On Windows: Ensure OpenCV has FFMPEG support (try: pip install opencv-python-headless)\n"
             else:
                 error_msg += "Check if laptop camera is available. Close other apps using the camera (Zoom, Teams, etc.). "
                 if sys.platform == 'darwin':
                     error_msg += "On macOS, grant camera permissions in System Settings."
+                elif sys.platform == 'win32':
+                    error_msg += "On Windows: Settings → Privacy → Camera → Allow apps to access camera."
             return jsonify({"status": "error", "message": error_msg}), 500
     except Exception as e:
         print(f"[VIDEO SERVER] Exception in start_camera: {e}")

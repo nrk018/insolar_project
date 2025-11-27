@@ -439,16 +439,50 @@ app.post("/api/detections/event", async (req, res) => {
     }
 });
 
-// ✅ Get Recent Detections
+// ✅ Get Recent Detections (only today's detections in India/Delhi timezone)
 app.get("/api/detections/recent", authenticateToken, async (req, res) => {
     try {
         const limit = parseInt(req.query.limit || "20", 10);
         
-        console.log(`[RECENT DETECTIONS] Fetching up to ${limit} detections...`);
+        // Get current date in India/Delhi timezone (IST - UTC+5:30)
+        const now = new Date();
+        // IST offset: UTC+5:30 = 5 hours 30 minutes = 330 minutes
+        const istOffsetMs = 5.5 * 60 * 60 * 1000;
+        
+        // Get current time in IST
+        const istNow = new Date(now.getTime() + istOffsetMs);
+        
+        // Get start of today in IST (00:00:00 IST)
+        const todayStartIST = new Date(Date.UTC(
+            istNow.getUTCFullYear(),
+            istNow.getUTCMonth(),
+            istNow.getUTCDate(),
+            0, 0, 0, 0
+        ));
+        // Convert IST start time back to UTC for database query
+        const todayStartUTC = new Date(todayStartIST.getTime() - istOffsetMs);
+        const todayStartISO = todayStartUTC.toISOString();
+        
+        // Get end of today in IST (23:59:59.999 IST)
+        const todayEndIST = new Date(Date.UTC(
+            istNow.getUTCFullYear(),
+            istNow.getUTCMonth(),
+            istNow.getUTCDate(),
+            23, 59, 59, 999
+        ));
+        // Convert IST end time back to UTC for database query
+        const todayEndUTC = new Date(todayEndIST.getTime() - istOffsetMs);
+        const todayEndISO = todayEndUTC.toISOString();
+        
+        console.log(`[RECENT DETECTIONS] Fetching today's detections (IST)`);
+        console.log(`[RECENT DETECTIONS] IST Today: ${todayStartIST.toISOString()} to ${todayEndIST.toISOString()}`);
+        console.log(`[RECENT DETECTIONS] UTC Query: ${todayStartISO} to ${todayEndISO}`);
         
         const { data, error } = await supabase
             .from("detection_events")
             .select("*")
+            .gte("detected_at", todayStartISO)
+            .lte("detected_at", todayEndISO)
             .order("detected_at", { ascending: false })
             .limit(limit);
 
@@ -462,7 +496,7 @@ app.get("/api/detections/recent", authenticateToken, async (req, res) => {
             return res.status(500).json({ error: "Failed to fetch detections", details: error.message });
         }
 
-        console.log(`[RECENT DETECTIONS] ✅ Returning ${data?.length || 0} detections`);
+        console.log(`[RECENT DETECTIONS] ✅ Returning ${data?.length || 0} detections for today (IST)`);
         if (data && data.length > 0) {
             console.log(`[RECENT DETECTIONS] Sample: ${data[0].worker_name} at ${data[0].detected_at}`);
         }
