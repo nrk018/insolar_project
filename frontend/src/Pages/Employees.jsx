@@ -199,14 +199,14 @@ const Employees = () => {
                     <td className="p-4 text-sm">{emp.designation || "—"}</td>
                     <td className="p-4">
                       {isCurrentUser(emp) ? (
-                        <span className="text-xs text-muted-foreground italic">
+                        <span className="text-xs text-muted-foreground italic whitespace-nowrap">
                           Cannot delete own account
                         </span>
                       ) : (
                         <button
                           onClick={() => handleDelete(emp.employee_id, emp.name)}
                           disabled={deletingId === emp.employee_id}
-                          className="px-3 py-1.5 text-xs font-medium text-white bg-destructive hover:bg-destructive/90 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
                         >
                           {deletingId === emp.employee_id ? 'Deleting...' : 'Delete'}
                         </button>

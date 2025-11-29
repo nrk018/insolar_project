@@ -412,6 +412,7 @@ def draw_annotated_image(frame, ppe_detections, face_results=None, use_display_t
         Annotated frame (BGR format)
     """
     annotated_frame = frame.copy()
+    frame_height, frame_width = annotated_frame.shape[:2]
     
     # Color mapping for each PPE item
     ppe_colors = {
@@ -422,9 +423,15 @@ def draw_annotated_image(frame, ppe_detections, face_results=None, use_display_t
         "vest": (255, 0, 0),        # Blue (same as jacket)
     }
     
-    # Draw PPE detection boxes
+    # Collect PPE detection summary for top display
+    ppe_summary = []
+    
+    # Draw PPE detection boxes (without labels above boxes)
     if ppe_detections and "all_detections" in ppe_detections:
         thresholds = PPE_DISPLAY_THRESHOLDS if use_display_thresholds else PPE_CLASS_THRESHOLDS
+        
+        # Track best detection for each PPE type
+        ppe_best_detections = {}
         
         for detection in ppe_detections["all_detections"]:
             ppe_item = detection.get("ppe_item")
@@ -438,29 +445,70 @@ def draw_annotated_image(frame, ppe_detections, face_results=None, use_display_t
             # Get threshold for this item
             item_threshold = thresholds.get(ppe_item, PPE_CONFIDENCE_THRESHOLD)
             
-            # Only draw if above threshold
+            # Only process if above threshold
             if ppe_item in ["helmet", "gloves", "boots", "jacket"] and conf >= item_threshold:
-                x1, y1, x2, y2 = map(int, box)
-                color = ppe_colors.get(ppe_item, (255, 255, 255))
-                
-                # Draw bounding box (thicker for visibility)
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 3)
-                
-                # Draw label with confidence
-                label = f"{ppe_item.capitalize()}: {conf:.2f}"
-                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                label_y = max(y1, label_size[1] + 10)
-                
-                # Draw background rectangle for text (better visibility)
-                cv2.rectangle(annotated_frame, (x1, label_y - label_size[1] - 5), 
-                            (x1 + label_size[0] + 10, label_y + 5), color, -1)
-                
-                # Draw text
-                cv2.putText(annotated_frame, label, (x1 + 5, label_y), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                # Keep track of best confidence for each item
+                if ppe_item not in ppe_best_detections or conf > ppe_best_detections[ppe_item]["confidence"]:
+                    ppe_best_detections[ppe_item] = {
+                        "box": box,
+                        "confidence": conf,
+                        "color": ppe_colors.get(ppe_item, (255, 255, 255))
+                    }
+        
+        # Draw boxes and collect summary
+        for ppe_item, detection_data in ppe_best_detections.items():
+            x1, y1, x2, y2 = map(int, detection_data["box"])
+            color = detection_data["color"]
+            conf = detection_data["confidence"]
+            
+            # Draw bounding box only (no labels)
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 3)
+            
+            # Add to summary for top display (convert to percentage)
+            ppe_summary.append(f"{ppe_item.capitalize()}: {conf*100:.1f}%")
+    
+    # Draw PPE summary text at the top of the image (each item on separate line)
+    if ppe_summary:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.4  # Very small font
+        thickness = 1
+        line_spacing = 15
+        
+        # Calculate maximum width needed
+        max_width = 0
+        total_height = 0
+        for item_text in ppe_summary:
+            (text_width, text_height), baseline = cv2.getTextSize(item_text, font, font_scale, thickness)
+            max_width = max(max_width, text_width)
+            total_height += text_height + line_spacing
+        
+        # Position at top left with padding
+        text_x = 10
+        start_y = 15
+        
+        # Draw semi-transparent background rectangle
+        overlay = annotated_frame.copy()
+        bg_padding = 5
+        cv2.rectangle(overlay, 
+                     (bg_padding, bg_padding), 
+                     (max_width + bg_padding * 2, total_height + bg_padding * 2), 
+                     (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, annotated_frame, 0.3, 0, annotated_frame)
+        
+        # Draw each item on a separate line
+        current_y = start_y
+        for item_text in ppe_summary:
+            (text_width, text_height), baseline = cv2.getTextSize(item_text, font, font_scale, thickness)
+            cv2.putText(annotated_frame, item_text, (text_x, current_y), 
+                      font, font_scale, (255, 255, 255), thickness)
+            current_y += text_height + line_spacing
     
     # Draw face recognition boxes and labels
     if face_results:
+        # Track label positions to avoid overlaps
+        used_label_positions = []
+        label_spacing = 30  # Minimum spacing between labels
+        
         for result in face_results:
             name = result.get("name", "Unknown")
             confidence = result.get("confidence", 0.0)
@@ -476,7 +524,7 @@ def draw_annotated_image(frame, ppe_detections, face_results=None, use_display_t
             if not is_real:
                 color = (0, 165, 255)  # Orange for spoof
                 name = "Spoof Detected"
-            elif name == "Unknown":
+            elif name.startswith("Unknown"):
                 color = (0, 0, 255)  # Red for unknown
             else:
                 color = (0, 255, 0)  # Green for recognized
@@ -484,17 +532,101 @@ def draw_annotated_image(frame, ppe_detections, face_results=None, use_display_t
             # Draw face bounding box
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 3)
             
-            # Draw label
+            # Draw label - position outside the box to avoid covering face
             label = f"{name} ({confidence:.2f})"
-            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-            label_y = y1 - 10 if y1 > 30 else y2 + 30
+            label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            label_height = label_size[1] + baseline
+            label_width = label_size[0]
+            
+            frame_height, frame_width = annotated_frame.shape[:2]
+            
+            # Find a position that doesn't overlap with other labels
+            label_x = None
+            label_y = None
+            
+            # Try positions in order: above, right, left, below
+            positions_to_try = [
+                (x1, y1 - 10, "above"),  # Above box
+                (x2 + 10, y1 + label_height, "right"),  # Right of box
+                (x1 - label_width - 10, y1 + label_height, "left"),  # Left of box
+                (x1, y2 + label_height + 10, "below")  # Below box
+            ]
+            
+            for pos_x, pos_y, position_name in positions_to_try:
+                # Check bounds
+                if pos_x < 0 or pos_x + label_width > frame_width:
+                    continue
+                if pos_y < label_height or pos_y > frame_height:
+                    continue
+                
+                # Check if this position overlaps with any existing label
+                overlaps = False
+                for used_x, used_y, used_w, used_h in used_label_positions:
+                    # Check if rectangles overlap
+                    if not (pos_x + label_width < used_x or pos_x > used_x + used_w or
+                           pos_y - label_height > used_y or pos_y < used_y - used_h):
+                        overlaps = True
+                        break
+                
+                if not overlaps:
+                    label_x = pos_x
+                    label_y = pos_y
+                    break
+            
+            # If no non-overlapping position found, use a position far from others
+            if label_x is None:
+                # Find a position with maximum distance from other labels
+                best_x = x1
+                best_y = y1 - 10 if y1 > label_height + 15 else y2 + label_height + 10
+                max_min_distance = 0
+                
+                # Try positions around the face box
+                for offset_x in range(-label_width - 50, label_width + 50, 20):
+                    for offset_y in range(-label_height - 50, label_height + 50, 20):
+                        test_x = x1 + offset_x
+                        test_y = y1 + offset_y
+                        
+                        if test_x < 0 or test_x + label_width > frame_width:
+                            continue
+                        if test_y < label_height or test_y > frame_height:
+                            continue
+                        
+                        # Calculate minimum distance to all used positions
+                        min_distance = float('inf')
+                        for used_x, used_y, used_w, used_h in used_label_positions:
+                            used_center_x = used_x + used_w / 2
+                            used_center_y = used_y - used_h / 2
+                            distance = ((test_x + label_width/2 - used_center_x)**2 + 
+                                       (test_y - label_height/2 - used_center_y)**2)**0.5
+                            min_distance = min(min_distance, distance)
+                        
+                        if min_distance > max_min_distance:
+                            max_min_distance = min_distance
+                            best_x = test_x
+                            best_y = test_y
+                
+                label_x = max(0, min(best_x, frame_width - label_width))
+                label_y = max(label_height, min(best_y, frame_height))
+            
+            # Record this label position
+            used_label_positions.append((label_x, label_y, label_width, label_height))
             
             # Draw background rectangle for text
-            cv2.rectangle(annotated_frame, (x1, label_y - label_size[1] - 5), 
-                        (x1 + label_size[0] + 10, label_y + 5), color, -1)
+            bg_x1 = label_x - 5
+            bg_y1 = label_y - label_height - 5
+            bg_x2 = label_x + label_width + 5
+            bg_y2 = label_y + 5
+            
+            # Make sure background doesn't go outside image bounds
+            bg_x1 = max(0, bg_x1)
+            bg_y1 = max(0, bg_y1)
+            bg_x2 = min(frame_width, bg_x2)
+            bg_y2 = min(frame_height, bg_y2)
+            
+            cv2.rectangle(annotated_frame, (bg_x1, bg_y1), (bg_x2, bg_y2), color, -1)
             
             # Draw text
-            cv2.putText(annotated_frame, label, (x1 + 5, label_y), 
+            cv2.putText(annotated_frame, label, (label_x, label_y), 
                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     return annotated_frame

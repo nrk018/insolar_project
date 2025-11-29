@@ -19,7 +19,7 @@ import {
     listPpeWorkers,
     listDefaulters,
 } from "./ppeService.js";
-import { maybeNotifyForPpe } from "./notificationService.js";
+import { maybeNotifyForPpe, sendManualEmail } from "./notificationService.js";
 
 dotenv.config();
 
@@ -462,9 +462,24 @@ app.post("/api/detections/event", async (req, res) => {
             // Continue without worker_id if resolution fails
         }
 
-        // Get current timestamp in ISO format (UTC)
-        const currentTimestamp = new Date().toISOString();
-        const localTime = new Date().toLocaleString();
+        // Get current timestamp - store in UTC (ISO format) for database consistency
+        // Frontend will convert to local time (IST) for display
+        const now = new Date();
+        const currentTimestamp = now.toISOString();
+        
+        // Log for debugging - show both UTC and IST
+        const istTime = now.toLocaleString('en-IN', { 
+            timeZone: 'Asia/Kolkata',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+        console.log("[DETECTION EVENT] Storing UTC timestamp:", currentTimestamp);
+        console.log("[DETECTION EVENT] Equivalent IST time:", istTime);
         
         const detectionData = {
             worker_id: worker_id || null,
@@ -479,7 +494,7 @@ app.post("/api/detections/event", async (req, res) => {
 
         console.log("[DETECTION EVENT] Upserting:", worker_name);
         console.log("[DETECTION EVENT] Server time (UTC):", currentTimestamp);
-        console.log("[DETECTION EVENT] Server time (local):", localTime);
+        console.log("[DETECTION EVENT] Server time (local):", istTime);
 
         // Upsert: Update existing entry for this worker_name, or insert new one
         // This ensures only one entry per person, with the latest detection time
@@ -1074,6 +1089,7 @@ app.post("/api/ppe/event", async (req, res) => {
             dailyViolations: ppeRecord.daily_violations,
             totalViolations: ppeRecord.total_violations,
             streak: ppeRecord.streak,
+            ppeItems: ppe_items || {}, // Pass PPE items to show which items are missing
         });
 
         return res.status(200).json({
@@ -1083,6 +1099,46 @@ app.post("/api/ppe/event", async (req, res) => {
         });
     } catch (error) {
         console.error("PPE /api/ppe/event error:", error);
+        return res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+// Manual email send endpoint (bypasses duplicate checks)
+app.post("/api/ppe/send-email", authenticateToken, async (req, res) => {
+    try {
+        const { worker_name, ppe_items } = req.body;
+        
+        if (!worker_name) {
+            return res.status(400).json({ error: "worker_name is required" });
+        }
+
+        const worker = await resolveWorkerFromName(worker_name);
+        if (!worker) {
+            return res.status(404).json({ error: "Worker not found for given name" });
+        }
+
+        if (!worker.email) {
+            return res.status(400).json({ error: "Worker has no email address" });
+        }
+
+        const result = await sendManualEmail({
+            worker,
+            ppeItems: ppe_items || {},
+        });
+
+        if (result.ok) {
+            return res.status(200).json({ 
+                message: "Email sent successfully",
+                email_sent: true 
+            });
+        } else {
+            return res.status(500).json({ 
+                error: result.reason || "Failed to send email",
+                email_sent: false 
+            });
+        }
+    } catch (error) {
+        console.error("PPE /api/ppe/send-email error:", error);
         return res.status(500).json({ error: "Internal Server Error" });
     }
 });
@@ -1101,12 +1157,114 @@ app.get("/api/ppe/workers", authenticateToken, async (req, res) => {
 // Defaulters (high streak of violations)
 app.get("/api/ppe/defaulters", authenticateToken, async (req, res) => {
     try {
-        const minStreak = parseInt(req.query.minStreak || "3", 10);
-        const rows = await listDefaulters({ minStreak });
+        const date = req.query.date || null; // Get date from query parameter
+        const minStreak = parseInt(req.query.minStreak || "1", 10);
+        const rows = await listDefaulters({ date, minStreak });
         return res.status(200).json(rows);
     } catch (error) {
         console.error("PPE /api/ppe/defaulters error:", error);
         return res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+// Update worker details
+app.post("/api/ppe/update-worker", authenticateToken, async (req, res) => {
+    try {
+        const { worker_id, name, email, mobile } = req.body;
+
+        if (!worker_id) {
+            return res.status(400).json({ error: "worker_id is required" });
+        }
+
+        // Update worker_details table
+        const updateData = {};
+        if (name !== undefined) updateData.name = name;
+        if (email !== undefined) updateData.email = email || null;
+        if (mobile !== undefined) updateData.mobile = mobile || null;
+
+        const { data, error: updateError } = await supabase
+            .from("worker_details")
+            .update(updateData)
+            .eq("worker_id", worker_id)
+            .select();
+
+        if (updateError) {
+            console.error("Error updating worker:", updateError);
+            return res.status(500).json({ error: "Failed to update worker", details: updateError.message });
+        }
+
+        if (!data || data.length === 0) {
+            // If worker doesn't exist in worker_details, create it
+            const { error: insertError } = await supabase
+                .from("worker_details")
+                .insert({
+                    worker_id: worker_id,
+                    name: name || null,
+                    email: email || null,
+                    mobile: mobile || null,
+                    state: "Uttar Pradesh"
+                });
+
+            if (insertError) {
+                console.error("Error inserting worker:", insertError);
+                return res.status(500).json({ error: "Failed to create worker", details: insertError.message });
+            }
+        }
+
+        console.log(`[UPDATE WORKER] Updated worker ${worker_id}`);
+        return res.status(200).json({ 
+            message: "Worker updated successfully",
+            worker_id
+        });
+    } catch (error) {
+        console.error("PPE /api/ppe/update-worker error:", error);
+        return res.status(500).json({ error: "Internal Server Error", details: error.message });
+    }
+});
+
+// Reset streak for a worker on a specific date
+app.post("/api/ppe/reset-streak", authenticateToken, async (req, res) => {
+    try {
+        const { worker_id, date } = req.body;
+
+        console.log(`[RESET STREAK] Request received: worker_id=${worker_id}, date=${date}`);
+
+        if (!worker_id || !date) {
+            console.error("[RESET STREAK] Missing parameters");
+            return res.status(400).json({ error: "worker_id and date are required" });
+        }
+
+        // Ensure date is in YYYY-MM-DD format
+        const dateStr = typeof date === 'string' ? date : date.split('T')[0];
+
+        // Update streak to 0 for the specified worker and date
+        const { data, error: updateError } = await supabase
+            .from("workers")
+            .update({ streak: 0 })
+            .eq("worker_id", worker_id)
+            .eq("date", dateStr)
+            .select();
+
+        if (updateError) {
+            console.error("[RESET STREAK] Supabase error:", updateError);
+            return res.status(500).json({ error: "Failed to reset streak", details: updateError.message });
+        }
+
+        if (!data || data.length === 0) {
+            console.warn(`[RESET STREAK] No record found for worker_id=${worker_id}, date=${dateStr}`);
+            return res.status(404).json({ error: "No record found for this worker and date" });
+        }
+
+        console.log(`[RESET STREAK] Successfully reset streak for ${worker_id} on ${dateStr}`);
+        return res.status(200).json({ 
+            message: "Streak reset successfully",
+            worker_id,
+            date: dateStr,
+            streak: 0
+        });
+    } catch (error) {
+        console.error("[RESET STREAK] Unexpected error:", error);
+        return res.status(500).json({ error: "Internal Server Error", details: error.message });
     }
 });
 

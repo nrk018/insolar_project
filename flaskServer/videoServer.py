@@ -60,7 +60,14 @@ processing_lock = threading.Lock()
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"[VIDEO SERVER] Using device: {device}")
 
-mtcnn = MTCNN(keep_all=True, device=device)
+# Make MTCNN more sensitive to detect all faces (lower thresholds)
+mtcnn = MTCNN(
+    keep_all=True, 
+    device=device,
+    min_face_size=20,  # Smaller minimum face size to catch more faces
+    thresholds=[0.4, 0.5, 0.5],  # Lower thresholds for better detection (default is [0.6, 0.7, 0.7])
+    factor=0.709  # Scale factor (default 0.709)
+)
 resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
 anti_spoof = AntiSpoofPredict(device_id=0)
 # Load trained PPE model if available, otherwise use pre-trained
@@ -328,6 +335,7 @@ def generate_frames():
     last_detection_time = {}  # Track last detection time per person to avoid spam
     last_image_save_time = {}  # Track last image save time per person to avoid saving too many images
     last_snapshot_path = {}  # Track last snapshot path per person to delete old snapshots
+    snapshot_creation_time = {}  # Track when each snapshot was created (for delayed deletion)
     frame_count = 0
     process_every_n_frames = 8  # Process every 8th frame (reduced frequency for better performance)
     DETECTION_COOLDOWN = 2.0  # Minimum seconds between detection events for same person
@@ -349,7 +357,45 @@ def generate_frames():
             except:
                 time.sleep(0.1)
     
+    # Background cleanup thread to delete old snapshots
+    def cleanup_old_snapshots():
+        global is_running
+        while True:
+            try:
+                if not is_running:
+                    time.sleep(5)
+                    continue
+                
+                current_timestamp = time.time()
+                # Check all snapshots and delete those older than 60 seconds
+                names_to_remove = []
+                for name, creation_time in snapshot_creation_time.items():
+                    if current_timestamp - creation_time >= 60:
+                        # Snapshot is older than 60 seconds, delete it
+                        if name in last_snapshot_path:
+                            old_snapshot_path = last_snapshot_path[name]
+                            old_snapshot_filepath = os.path.join(DETECTION_SNAPSHOTS_FOLDER, os.path.basename(old_snapshot_path))
+                            try:
+                                if os.path.exists(old_snapshot_filepath):
+                                    os.remove(old_snapshot_filepath)
+                                    names_to_remove.append(name)
+                            except Exception as e:
+                                pass
+                
+                # Clean up tracking dictionaries
+                for name in names_to_remove:
+                    if name in snapshot_creation_time:
+                        del snapshot_creation_time[name]
+                    if name in last_snapshot_path:
+                        del last_snapshot_path[name]
+                
+                # Run cleanup every 10 seconds
+                time.sleep(10)
+            except Exception as e:
+                time.sleep(10)
+    
     processor_thread = None
+    cleanup_thread = None
     
     # Keep generating frames even when not running (show placeholder)
     while True:
@@ -381,6 +427,11 @@ def generate_frames():
             if processor_thread is None or not processor_thread.is_alive():
                 processor_thread = threading.Thread(target=background_processor, daemon=True)
                 processor_thread.start()
+            
+            # Start cleanup thread if not running
+            if cleanup_thread is None or not cleanup_thread.is_alive():
+                cleanup_thread = threading.Thread(target=cleanup_old_snapshots, daemon=True)
+                cleanup_thread.start()
             
             # Read frame without grabbing multiple times (causes stuttering)
             ret, frame = camera.read()
@@ -458,28 +509,16 @@ def generate_frames():
                     should_send_detection = False
                     if name not in last_detection_time:
                         should_send_detection = True
-                        print(f"[DEBUG] First detection for {name}, will send event")
                     elif (current_time - last_detection_time[name]) >= DETECTION_COOLDOWN:
                         should_send_detection = True
-                        print(f"[DEBUG] Cooldown passed for {name}, will send event")
                     
                     if should_send_detection:
-                        print(f"[DEBUG] Sending detection event for {name} (confidence: {confidence:.2f})")
                         try:
-                            # Delete previous snapshot for this person if it exists
-                            if name in last_snapshot_path:
-                                old_snapshot_path = last_snapshot_path[name]
-                                old_snapshot_filepath = os.path.join(DETECTION_SNAPSHOTS_FOLDER, os.path.basename(old_snapshot_path))
-                                try:
-                                    if os.path.exists(old_snapshot_filepath):
-                                        os.remove(old_snapshot_filepath)
-                                        print(f"[SNAPSHOT] Deleted previous snapshot: {os.path.basename(old_snapshot_path)}")
-                                except Exception as e:
-                                    print(f"[SNAPSHOT DELETE ERROR] Failed to delete old snapshot for {name}: {e}")
-                            
                             # Create snapshot with annotations for Recent Detections
+                            # Note: Old snapshots are cleaned up by the background cleanup thread
                             snapshot_path = None
                             annotated_snapshot = None
+                            snapshot_time = datetime.now().strftime("%H:%M:%S")
                             try:
                                 # Use the processed frame that matches the detection data
                                 snapshot_frame = None
@@ -490,7 +529,6 @@ def generate_frames():
                                 # Fallback to current frame if processed frame not available
                                 if snapshot_frame is None:
                                     snapshot_frame = frame.copy()
-                                    print(f"[SNAPSHOT WARNING] Using current frame instead of processed frame")
                                 
                                 annotated_snapshot = draw_annotated_image(
                                     snapshot_frame, 
@@ -498,25 +536,19 @@ def generate_frames():
                                     face_results, 
                                     use_display_thresholds=True
                                 )
-                                print(f"[SNAPSHOT] Created annotated image for {name}, frame shape: {annotated_snapshot.shape}")
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
                                 safe_name = name.replace(" ", "_").replace("/", "_")
                                 snapshot_filename = f"detection_{safe_name}_{timestamp}.jpg"
                                 snapshot_filepath = os.path.join(DETECTION_SNAPSHOTS_FOLDER, snapshot_filename)
                                 success = cv2.imwrite(snapshot_filepath, annotated_snapshot)
-                                if not success:
-                                    print(f"[SNAPSHOT ERROR] Failed to write image to {snapshot_filepath}")
-                                else:
+                                if success:
                                     # Store relative path for backend (will be served as static file)
                                     snapshot_path = f"detection_snapshots/{snapshot_filename}"
-                                    # Update last snapshot path for this person
+                                    # Update last snapshot path and creation time for this person
                                     last_snapshot_path[name] = snapshot_path
-                                    print(f"[SNAPSHOT] ✅ Saved detection snapshot: {snapshot_filename} at {snapshot_filepath}")
-                                    print(f"[SNAPSHOT] 📍 Snapshot path stored: {snapshot_path}")
+                                    snapshot_creation_time[name] = current_timestamp
                             except Exception as e:
-                                print(f"[SNAPSHOT ERROR] Failed to save snapshot for {name}: {e}")
-                                import traceback
-                                traceback.print_exc()
+                                pass
                             
                             detection_event_url = "http://localhost:3000/api/detections/event"
                             response = None
@@ -529,11 +561,12 @@ def generate_frames():
                                     "camera_source": camera_source or "webcam",
                                     "snapshot_path": snapshot_path  # Include snapshot path
                                 }
-                                print(f"[DETECTION EVENT] 📤 Sending to backend: {name}, confidence: {confidence:.2f}, snapshot_path: {snapshot_path}")
                                 response = requests.post(detection_event_url, json=payload, timeout=3.0)
                                 if response.status_code == 200:
                                     last_detection_time[name] = current_time
-                                    print(f"[DETECTION EVENT] ✅ Successfully stored: {name} (confidence: {confidence:.2f}, PPE: {ppe_compliant_person}, snapshot: {snapshot_path})")
+                                    # Simple one-line output
+                                    ppe_status = "compliant" if ppe_compliant_person else "non-compliant"
+                                    print(f"detected: {name} {confidence:.2f} snapshot taken at {snapshot_time}, ppe: {ppe_status}")
                                     
                                     # Also save to saved_detections folder (with cooldown) - only if detection was successful
                                     should_save_image = False
@@ -553,27 +586,11 @@ def generate_frames():
                                             save_frame = annotated_snapshot if annotated_snapshot is not None else frame.copy()
                                             cv2.imwrite(filepath, save_frame)
                                             last_image_save_time[name] = current_time
-                                            print(f"[IMAGE SAVED] Saved annotated image: {filename}")
                                         except Exception as e:
-                                            print(f"[IMAGE SAVE ERROR] Failed to save image for {name}: {e}")
-                                            import traceback
-                                            traceback.print_exc()
-                                else:
-                                    print(f"[DETECTION EVENT] ❌ Backend returned {response.status_code}: {response.text}")
-                            except requests.exceptions.ConnectionError as conn_err:
-                                print(f"[DETECTION EVENT] ❌ Connection error - Is backend running on port 3000? {conn_err}")
-                            except requests.exceptions.Timeout as timeout_err:
-                                print(f"[DETECTION EVENT] ❌ Timeout error: {timeout_err}")
-                            except requests.exceptions.RequestException as req_err:
-                                print(f"[DETECTION EVENT] ❌ Request error: {req_err}")
+                                            pass
                             except Exception as req_e:
-                                print(f"[DETECTION EVENT] ❌ Unexpected error: {req_e}")
-                                import traceback
-                                traceback.print_exc()
+                                pass
                         except Exception as e:
-                            print(f"[DETECTION EVENT ERROR] Exception: {e}")
-                            import traceback
-                            traceback.print_exc()
                             pass
                 
                 # Don't draw face boxes on live feed (user requested removal)
@@ -743,6 +760,8 @@ def analyze_image():
         try:
             embeddings_with_boxes = detect_and_encode(rgb_frame)
             print(f"[ANALYZE] Detected {len(embeddings_with_boxes)} face(s) in image")
+            if len(embeddings_with_boxes) == 0:
+                print("[ANALYZE WARNING] No faces detected - MTCNN may need lower thresholds")
         except Exception as e:
             print(f"[ANALYZE ERROR] Face detection failed: {e}")
             import traceback
@@ -789,39 +808,259 @@ def analyze_image():
         else:
             print("[ANALYZE WARNING] PPE model not loaded")
         
-        # Process each detected face
+        # Helper function to match PPE items to a person based on spatial proximity
+        # First, collect all person boxes to ensure each PPE item goes to the closest person
+        # We'll collect boxes first, then number unknowns later
+        all_person_boxes = []
         for embedding, box in embeddings_with_boxes:
+            x1, y1, x2, y2 = map(int, box)
+            all_person_boxes.append({
+                "box": [x1, y1, x2, y2],
+                "center": [(x1 + x2) / 2, (y1 + y2) / 2],
+                "size": ((x2 - x1) + (y2 - y1)) / 2
+            })
+        
+        def match_ppe_to_person(person_box, ppe_detections, all_person_boxes):
+            """Match PPE items to a specific person based on bounding box proximity - stricter matching"""
+            person_x1, person_y1, person_x2, person_y2 = person_box
+            person_center_x = (person_x1 + person_x2) / 2
+            person_center_y = (person_y1 + person_y2) / 2
+            person_width = person_x2 - person_x1
+            person_height = person_y2 - person_y1
+            person_size = (person_width + person_height) / 2
+            
+            # Estimate full body box from face box (face is typically in upper portion)
+            # Assume body extends ~3x face height below the face
+            frame_height, frame_width = frame.shape[:2]
+            estimated_body_height = person_height * 3.5
+            estimated_body_y1 = person_y1
+            estimated_body_y2 = min(person_y2 + estimated_body_height, frame_height)  # Don't exceed frame
+            estimated_body_x1 = max(0, person_x1 - person_width * 0.5)  # Body is wider than face
+            estimated_body_x2 = min(frame_width, person_x2 + person_width * 0.5)
+            
+            # Use estimated body size for distance calculations
+            body_width = estimated_body_x2 - estimated_body_x1
+            body_height = estimated_body_y2 - estimated_body_y1
+            body_size = (body_width + body_height) / 2
+            body_center_x = (estimated_body_x1 + estimated_body_x2) / 2
+            body_center_y = (estimated_body_y1 + estimated_body_y2) / 2
+            
+            # Initialize PPE items for this person
+            person_ppe_items = {
+                "helmet": False,
+                "gloves": False,
+                "boots": False,
+                "jacket": False
+            }
+            person_ppe_accuracy = {
+                "helmet": 0.0,
+                "gloves": 0.0,
+                "boots": 0.0,
+                "jacket": 0.0
+            }
+            
+            if ppe_detections and "all_detections" in ppe_detections:
+                # For each PPE item, find the one closest to this person
+                ppe_by_type = {}  # Group by type, keep closest one
+                
+                for idx, detection in enumerate(ppe_detections["all_detections"]):
+                    ppe_item = detection.get("ppe_item")
+                    ppe_box = detection.get("box")
+                    conf = detection.get("confidence", 0.0)
+                    
+                    if not ppe_item or not ppe_box:
+                        continue
+                    
+                    ppe_x1, ppe_y1, ppe_x2, ppe_y2 = map(float, ppe_box)
+                    ppe_center_x = (ppe_x1 + ppe_x2) / 2
+                    ppe_center_y = (ppe_y1 + ppe_y2) / 2
+                    ppe_width = ppe_x2 - ppe_x1
+                    ppe_height = ppe_y2 - ppe_y1
+                    ppe_area = ppe_width * ppe_height
+                    
+                    # First, check if this PPE item is closer to THIS person than to any other person
+                    # This prevents PPE from one person being assigned to another
+                    distance_to_this_person = None
+                    is_closest_to_this_person = True
+                    
+                    if ppe_item == "helmet":
+                        # Helmet should be very close to the face
+                        distance_to_this_person = ((ppe_center_x - person_center_x)**2 + (ppe_center_y - person_center_y)**2)**0.5
+                        # Helmet must be within 2x face height (much stricter)
+                        max_helmet_distance = person_height * 2.0
+                        
+                        # Check distance to all other persons
+                        for other_person in all_person_boxes:
+                            if other_person["box"] == person_box:
+                                continue
+                            other_center = other_person["center"]
+                            distance_to_other = ((ppe_center_x - other_center[0])**2 + (ppe_center_y - other_center[1])**2)**0.5
+                            if distance_to_other < distance_to_this_person:
+                                is_closest_to_this_person = False
+                                break
+                        
+                        is_near_person = is_closest_to_this_person and distance_to_this_person < max_helmet_distance
+                        distance = distance_to_this_person
+                        
+                    elif ppe_item == "jacket":
+                        # Jacket must have significant overlap with the body AND be close
+                        overlap_x = max(0, min(ppe_x2, estimated_body_x2) - max(ppe_x1, estimated_body_x1))
+                        overlap_y = max(0, min(ppe_y2, estimated_body_y2) - max(ppe_y1, estimated_body_y1))
+                        overlap_area = overlap_x * overlap_y
+                        overlap_ratio = overlap_area / ppe_area if ppe_area > 0 else 0
+                        
+                        # Also check distance to body center
+                        distance_to_body = ((ppe_center_x - body_center_x)**2 + (ppe_center_y - body_center_y)**2)**0.5
+                        distance_to_this_person = distance_to_body
+                        
+                        # Check distance to all other persons' body centers
+                        for other_person in all_person_boxes:
+                            if other_person["box"] == person_box:
+                                continue
+                            other_box = other_person["box"]
+                            other_x1, other_y1, other_x2, other_y2 = other_box
+                            # Estimate other person's body box
+                            other_height = other_y2 - other_y1
+                            other_estimated_body_y2 = min(other_y2 + other_height * 3.5, frame_height)
+                            other_estimated_body_x1 = max(0, other_x1 - (other_x2 - other_x1) * 0.5)
+                            other_estimated_body_x2 = min(frame_width, other_x2 + (other_x2 - other_x1) * 0.5)
+                            other_body_center_x = (other_estimated_body_x1 + other_estimated_body_x2) / 2
+                            other_body_center_y = (other_y1 + other_estimated_body_y2) / 2
+                            distance_to_other = ((ppe_center_x - other_body_center_x)**2 + (ppe_center_y - other_body_center_y)**2)**0.5
+                            if distance_to_other < distance_to_body:
+                                is_closest_to_this_person = False
+                                break
+                        
+                        # Require BOTH: at least 25% overlap AND be close to body center (within 1.2x body size)
+                        # This ensures jacket is actually on this person's body
+                        has_overlap = overlap_ratio >= 0.25
+                        is_close = distance_to_body < body_size * 1.2
+                        is_near_person = is_closest_to_this_person and has_overlap and is_close
+                        distance = distance_to_body
+                        
+                    elif ppe_item in ["gloves", "boots"]:
+                        # Gloves and boots must be close to body center (within 2x body size)
+                        distance_to_body = ((ppe_center_x - body_center_x)**2 + (ppe_center_y - body_center_y)**2)**0.5
+                        distance_to_this_person = distance_to_body
+                        
+                        # Check distance to all other persons
+                        for other_person in all_person_boxes:
+                            if other_person["box"] == person_box:
+                                continue
+                            other_box = other_person["box"]
+                            other_x1, other_y1, other_x2, other_y2 = other_box
+                            other_center_x = (other_x1 + other_x2) / 2
+                            other_center_y = (other_y1 + other_y2) / 2
+                            distance_to_other = ((ppe_center_x - other_center_x)**2 + (ppe_center_y - other_center_y)**2)**0.5
+                            if distance_to_other < distance_to_body:
+                                is_closest_to_this_person = False
+                                break
+                        
+                        is_near_person = is_closest_to_this_person and distance_to_body < body_size * 2.0
+                        distance = distance_to_body
+                    else:
+                        # Default: use body size
+                        distance_to_body = ((ppe_center_x - body_center_x)**2 + (ppe_center_y - body_center_y)**2)**0.5
+                        distance_to_this_person = distance_to_body
+                        
+                        # Check distance to all other persons
+                        for other_person in all_person_boxes:
+                            if other_person["box"] == person_box:
+                                continue
+                            other_center = other_person["center"]
+                            distance_to_other = ((ppe_center_x - other_center[0])**2 + (ppe_center_y - other_center[1])**2)**0.5
+                            if distance_to_other < distance_to_body:
+                                is_closest_to_this_person = False
+                                break
+                        
+                        is_near_person = is_closest_to_this_person and distance_to_body < body_size * 2.0
+                        distance = distance_to_body
+                    
+                    if is_near_person:
+                        # For each PPE type, keep the closest detection
+                        if ppe_item not in ppe_by_type or distance < ppe_by_type[ppe_item]["distance"]:
+                            ppe_by_type[ppe_item] = {
+                                "detected": True,
+                                "confidence": conf,
+                                "distance": distance
+                            }
+                
+                # Assign matched PPE items to this person
+                for item in person_ppe_items.keys():
+                    if item in ppe_by_type:
+                        person_ppe_items[item] = ppe_by_type[item]["detected"]
+                        person_ppe_accuracy[item] = ppe_by_type[item]["confidence"]
+            
+            # Calculate compliance and average confidence for this person
+            person_compliant = all(person_ppe_items.values())
+            detected_confidences = [person_ppe_accuracy[item] for item in person_ppe_items.keys() if person_ppe_items[item]]
+            person_avg_confidence = sum(detected_confidences) / len(detected_confidences) if detected_confidences else 0.0
+            
+            return person_ppe_items, person_ppe_accuracy, person_compliant, person_avg_confidence
+        
+        # First pass: collect all faces and number unknown persons
+        unknown_count = 0
+        face_data_list = []
+        print(f"[ANALYZE] Processing {len(embeddings_with_boxes)} detected faces")
+        for idx, (embedding, box) in enumerate(embeddings_with_boxes):
             try:
                 name, confidence = match_embedding(embedding)
-                print(f"[ANALYZE] Matched face: {name} (confidence: {confidence:.3f}, threshold: {THRESHOLD})")
                 x1, y1, x2, y2 = map(int, box)
-                
                 is_real = is_real_face(frame, box, anti_spoof)
                 
-                ppe_items_dict = {}
-                ppe_items_accuracy = {}  # Store accuracy/confidence for each item
-                ppe_avg_confidence = 0.0
-                if ppe_compliance_dict:
-                    for item, data in ppe_compliance_dict.items():
-                        # Ensure boolean values are Python bool, not NumPy bool_
-                        ppe_items_dict[item] = bool(data["detected"])
-                        ppe_items_accuracy[item] = float(data["confidence"])  # Store confidence as accuracy
-                    confidences = [data["confidence"] for data in ppe_compliance_dict.values() if data["detected"]]
-                    ppe_avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+                # Number unknown persons
+                if name == "Unknown" and is_real:
+                    unknown_count += 1
+                    name = f"Unknown {unknown_count}"
+                
+                print(f"[ANALYZE] Face {idx+1}: {name} (confidence: {confidence:.3f}, real: {is_real})")
+                
+                face_data_list.append({
+                    "name": name,
+                    "confidence": confidence,
+                    "is_real": is_real,
+                    "box": [x1, y1, x2, y2],
+                    "embedding": embedding
+                })
+            except Exception as e:
+                print(f"[ANALYZE ERROR] Error processing face {idx+1}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        print(f"[ANALYZE] Successfully processed {len(face_data_list)} faces out of {len(embeddings_with_boxes)} detected")
+        
+        # Second pass: match PPE items and create results
+        for face_data in face_data_list:
+            try:
+                name = face_data["name"]
+                confidence = face_data["confidence"]
+                is_real = face_data["is_real"]
+                x1, y1, x2, y2 = face_data["box"]
+                
+                print(f"[ANALYZE] Matched face: {name} (confidence: {confidence:.3f}, threshold: {THRESHOLD})")
+                
+                # Match PPE items specifically to this person
+                person_box = [x1, y1, x2, y2]
+                ppe_items_dict, ppe_items_accuracy, person_ppe_compliant, ppe_avg_confidence = match_ppe_to_person(
+                    person_box, ppe_detections, all_person_boxes
+                )
                 
                 results.append({
                     "name": name,
                     "confidence": float(confidence),
                     "is_real": bool(is_real),  # Convert to Python bool
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
-                    "ppe_compliant": bool(ppe_compliant),  # Convert to Python bool
-                    "ppe_items": ppe_items_dict,
-                    "ppe_items_accuracy": ppe_items_accuracy,  # Add accuracy metrics per item
-                    "ppe_confidence": float(ppe_avg_confidence),
+                    "ppe_compliant": bool(person_ppe_compliant),  # Per-person compliance
+                    "ppe_items": ppe_items_dict,  # Per-person PPE items
+                    "ppe_items_accuracy": ppe_items_accuracy,  # Per-person accuracy
+                    "ppe_confidence": float(ppe_avg_confidence),  # Per-person confidence
                     "helmet_detected": bool(ppe_items_dict.get("helmet", False))  # Convert to Python bool
                 })
             except Exception as e:
                 print(f"[ANALYZE ERROR] Error processing face: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         # Prepare PPE items dict for response (even if no faces)

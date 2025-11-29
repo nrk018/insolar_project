@@ -31,6 +31,8 @@ const CameraMonitor = () => {
   const [recognizedWorkers, setRecognizedWorkers] = useState([]);
   const [flaskConnected, setFlaskConnected] = useState(false);
   const [recentDetections, setRecentDetections] = useState([]);
+  const [sendingEmails, setSendingEmails] = useState({}); // Track which emails are being sent
+  const [previewDetection, setPreviewDetection] = useState(null);
   const videoRef = useRef(null);
 
   const FLASK_URL = import.meta.env.VITE_FLASK_URL || 'http://localhost:5000';
@@ -52,12 +54,24 @@ const CameraMonitor = () => {
       fetchRecentDetections();
     }, 5000);
 
-    return () => {
-      // Cleanup: stop camera when component unmounts
-      if (isRunning) {
-        stopCamera();
+    // Stop camera on page unload (logout, close tab, etc.)
+    const handleBeforeUnload = () => {
+      // Use sendBeacon for more reliable cleanup on page unload
+      try {
+        navigator.sendBeacon(`${FLASK_URL}/api/camera/stop`, '');
+      } catch (e) {
+        // Fallback if sendBeacon fails
+        console.warn('Could not send camera stop beacon:', e);
       }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      // Don't stop camera on component unmount - let it run across pages
+      // Only stop on logout or page close
       clearInterval(interval);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, []);
 
@@ -167,6 +181,39 @@ const CameraMonitor = () => {
     }
   };
 
+  const handleSendEmail = async (detection) => {
+    const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
+    
+    // Prevent multiple clicks
+    if (sendingEmails[detectionKey]) {
+      return;
+    }
+
+    setSendingEmails(prev => ({ ...prev, [detectionKey]: true }));
+
+    try {
+      const response = await axios.post('/api/ppe/send-email', {
+        worker_name: detection.worker_name,
+        ppe_items: detection.ppe_items || {}
+      });
+
+      if (response.data.email_sent) {
+        alert(`Email sent successfully to ${detection.worker_name}`);
+      } else {
+        alert(`Failed to send email: ${response.data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error('Error sending email:', err);
+      alert(`Error sending email: ${err.response?.data?.error || err.message || 'Unknown error'}`);
+    } finally {
+      setSendingEmails(prev => {
+        const newState = { ...prev };
+        delete newState[detectionKey];
+        return newState;
+      });
+    }
+  };
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       <div className="flex flex-col space-y-2">
@@ -257,63 +304,82 @@ const CameraMonitor = () => {
         )}
       </div>
 
-      {/* Video Feed */}
-      <div className="rounded-lg border bg-card p-4">
-        <h2 className="text-xl font-semibold mb-4">Live Feed</h2>
-        <div className="relative bg-black rounded-lg overflow-hidden" style={{ aspectRatio: '16/9' }}>
-          {isRunning ? (
-            <img
-              ref={videoRef}
-              src={`${FLASK_URL}/video_feed`}
-              alt="Camera Feed"
-              className="w-full h-full object-contain"
-              onError={(e) => {
-                console.error('Video feed error');
-                setError('Failed to load video feed. Make sure Flask server is running on port 5000.');
-              }}
-            />
-          ) : (
-            <div className="flex items-center justify-center h-full text-muted-foreground">
-              <div className="text-center">
-                <p className="text-lg mb-2">Camera not started</p>
-                <p className="text-sm">Click "Start RTSP" or "Start Laptop Camera" to begin</p>
+      {/* Main Content: Camera on Left, Recent Detections on Right */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Video Feed - Left Side */}
+        <div className="rounded-lg border bg-card p-4">
+          <h2 className="text-xl font-semibold mb-4">Live Feed</h2>
+          <div className="relative bg-black rounded-lg overflow-hidden" style={{ aspectRatio: '16/9', maxHeight: '500px' }}>
+            {isRunning ? (
+              <img
+                ref={videoRef}
+                src={`${FLASK_URL}/video_feed`}
+                alt="Camera Feed"
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  console.error('Video feed error');
+                  setError('Failed to load video feed. Make sure Flask server is running on port 5000.');
+                }}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-muted-foreground">
+                <div className="text-center">
+                  <p className="text-lg mb-2">Camera not started</p>
+                  <p className="text-sm">Click "Start RTSP" or "Start Laptop Camera" to begin</p>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Recent Detections */}
-      <div className="rounded-lg border bg-card p-4">
-        <h2 className="text-xl font-semibold mb-4">Recent Detections</h2>
-        {recentDetections.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No detections yet. Workers detected in the live feed will appear here.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {recentDetections.map((detection, idx) => {
-              // Parse the detected_at timestamp (handles both ISO string and Date objects)
-              // The ISO string from backend is in UTC, new Date() automatically converts to local time
+        {/* Recent Detections - Right Side */}
+        <div className="rounded-lg border bg-card p-4 flex flex-col">
+          <h2 className="text-xl font-semibold mb-4">Recent Detections</h2>
+          {recentDetections.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No detections yet. Workers detected in the live feed will appear here.
+            </p>
+          ) : (
+            <div className="flex-1 overflow-y-auto space-y-2 pr-2" style={{ maxHeight: '500px' }}>
+              {recentDetections.map((detection, idx) => {
+              // Parse the detected_at timestamp
+              // Backend sends UTC ISO string - convert to local time (IST/Asia/Kolkata)
               let detectedAt;
               try {
-                detectedAt = detection.detected_at 
-                  ? new Date(detection.detected_at) 
-                  : new Date();
-                
-                // Validate the date
-                if (isNaN(detectedAt.getTime())) {
-                  console.error('Invalid date:', detection.detected_at);
-                  return null;
+                if (detection.detected_at) {
+                  const timestampStr = detection.detected_at;
+                  
+                  // Backend always sends UTC ISO string (ends with 'Z')
+                  // Parse it explicitly as UTC
+                  if (typeof timestampStr === 'string') {
+                    // Ensure it's treated as UTC - add 'Z' if missing
+                    const utcString = timestampStr.endsWith('Z') ? timestampStr : timestampStr + 'Z';
+                    detectedAt = new Date(utcString);
+                  } else if (timestampStr instanceof Date) {
+                    detectedAt = timestampStr;
+                  } else {
+                    detectedAt = new Date(timestampStr);
+                  }
+                  
+                  // Validate the date
+                  if (isNaN(detectedAt.getTime())) {
+                    console.error('Invalid date:', detection.detected_at);
+                    return null;
+                  }
+                  
+                } else {
+                  detectedAt = new Date();
                 }
               } catch (e) {
                 console.error('Error parsing date:', detection.detected_at, e);
                 return null;
               }
               
+              // Calculate time ago (using the Date object directly)
               const timeAgo = getTimeAgo(detectedAt);
               
-              // Format time in India/Delhi timezone (Asia/Kolkata - IST)
+              // Format time in IST (Asia/Kolkata) - India Standard Time
+              // The Date object is in UTC, so toLocaleString with timeZone will convert correctly
               const timeString = detectedAt.toLocaleTimeString('en-IN', { 
                 hour: '2-digit', 
                 minute: '2-digit', 
@@ -329,6 +395,27 @@ const CameraMonitor = () => {
                 timeZone: 'Asia/Kolkata'
               });
               
+              // Full date-time string for display in IST
+              // Format: "28 Nov 2025, 01:25:48 PM" (IST)
+              const fullDateTimeString = detectedAt.toLocaleString('en-IN', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+                timeZone: 'Asia/Kolkata'
+              });
+              
+              // Debug: Log the conversion for troubleshooting
+              if (idx === 0) { // Only log for first item to avoid spam
+                console.log('[TIME CONVERSION] Original timestamp:', detection.detected_at);
+                console.log('[TIME CONVERSION] Parsed Date (UTC):', detectedAt.toISOString());
+                console.log('[TIME CONVERSION] Current local time:', new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+                console.log('[TIME CONVERSION] Display time (IST):', fullDateTimeString);
+              }
+              
               const FLASK_URL = import.meta.env.VITE_FLASK_URL || 'http://localhost:5000';
               // Construct snapshot URL - snapshot_path is like "detection_snapshots/filename.jpg"
               const snapshotUrl = detection.snapshot_path 
@@ -340,25 +427,28 @@ const CameraMonitor = () => {
                 console.log(`[RECENT DETECTIONS] Snapshot path: ${detection.snapshot_path}, URL: ${snapshotUrl}`);
               }
               
+              const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
+              const isSendingEmail = sendingEmails[detectionKey];
+
               return (
                 <div
                   key={idx}
-                  className="flex items-center gap-4 p-3 rounded-md border bg-muted/30 hover:bg-muted/50 transition-colors"
+                  className="flex items-center gap-3 p-3 rounded-md border bg-muted/30 hover:bg-muted/50 transition-colors"
                 >
                   {/* Snapshot Image */}
                   {snapshotUrl ? (
-                    <div className="flex-shrink-0">
+                    <div className="flex-shrink-0 cursor-pointer" onClick={() => setPreviewDetection(detection)}>
                       <img
                         src={snapshotUrl}
                         alt={`${detection.worker_name} detection`}
-                        className="w-24 h-24 object-cover rounded border"
+                        className="w-20 h-20 object-cover rounded border hover:opacity-80 transition-opacity"
                         onError={(e) => {
                           console.error(`[SNAPSHOT ERROR] Failed to load image: ${snapshotUrl}`);
                           e.target.style.display = 'none';
                           // Show error indicator
                           const parent = e.target.parentElement;
                           if (parent) {
-                            parent.innerHTML = '<div class="w-24 h-24 bg-red-100 rounded border flex items-center justify-center"><span class="text-xs text-red-600">Error</span></div>';
+                            parent.innerHTML = '<div class="w-20 h-20 bg-red-100 rounded border flex items-center justify-center"><span class="text-xs text-red-600">Error</span></div>';
                           }
                         }}
                         onLoad={() => {
@@ -367,56 +457,202 @@ const CameraMonitor = () => {
                       />
                     </div>
                   ) : (
-                    <div className="flex-shrink-0 w-24 h-24 bg-muted rounded border flex items-center justify-center">
+                    <div className="flex-shrink-0 w-20 h-20 bg-muted rounded border flex items-center justify-center">
                       <span className="text-xs text-muted-foreground">No image</span>
                     </div>
                   )}
                   
                   {/* Detection Info */}
-                  <div className="flex-1 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-3 h-3 rounded-full ${
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
                         detection.ppe_compliant ? 'bg-green-500' : 'bg-red-500'
                       }`}></div>
-                      <div>
-                        <p className="font-medium">{detection.worker_name}</p>
-                        <p className="text-xs text-muted-foreground">
-                          Confidence: {(detection.confidence * 100).toFixed(1)}% | 
-                          {detection.camera_source && ` ${detection.camera_source.toUpperCase()}`}
-                        </p>
-                        {/* PPE Items Status */}
-                        {detection.ppe_items && (
-                          <div className="flex gap-2 mt-1 text-xs">
-                            {Object.entries(detection.ppe_items).map(([item, detected]) => (
-                              <span
-                                key={item}
-                                className={`px-1.5 py-0.5 rounded ${
-                                  detected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                                }`}
-                              >
-                                {item.charAt(0).toUpperCase() + item.slice(1)}: {detected ? '✓' : '✗'}
-                              </span>
-                            ))}
-                          </div>
-                        )}
+                      <p className="font-medium text-sm truncate">{detection.worker_name}</p>
+                    </div>
+                    <p className="text-xs text-muted-foreground mb-1">
+                      {(detection.confidence * 100).toFixed(1)}% | {timeAgo}
+                    </p>
+                    <p className="text-xs text-muted-foreground mb-1">
+                      Recognized at: {fullDateTimeString}
+                    </p>
+                    {/* PPE Items Status */}
+                    {detection.ppe_items && (
+                      <div className="flex flex-wrap gap-1 mb-2 text-xs">
+                        {Object.entries(detection.ppe_items).map(([item, detected]) => (
+                          <span
+                            key={item}
+                            className={`px-1.5 py-0.5 rounded ${
+                              detected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}
+                          >
+                            {item.charAt(0).toUpperCase() + item.slice(1)}: {detected ? '✓' : '✗'}
+                          </span>
+                        ))}
                       </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-medium">{timeAgo}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {timeString}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {dateString}
-                      </p>
-                    </div>
+                    )}
+                    {/* Send Email Button */}
+                    <button
+                      onClick={() => handleSendEmail(detection)}
+                      disabled={isSendingEmail}
+                      className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                        isSendingEmail
+                          ? 'bg-gray-400 text-white cursor-not-allowed'
+                          : 'bg-blue-500 text-white hover:bg-blue-600'
+                      }`}
+                    >
+                      {isSendingEmail ? 'Sending...' : 'Send Email'}
+                    </button>
                   </div>
                 </div>
               );
-            })}
-          </div>
-        )}
+              })}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Image Preview Modal */}
+      {previewDetection && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backdropFilter: 'blur(8px)', backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+          onClick={() => setPreviewDetection(null)}
+        >
+          <div 
+            className="bg-white rounded-lg shadow-xl w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header with Close Button */}
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-xl font-semibold">Detection Preview</h3>
+              <button
+                onClick={() => setPreviewDetection(null)}
+                className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                aria-label="Close"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Content: Image on Left, Details on Right */}
+            <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
+              {/* Image Section - Left */}
+              <div className="lg:w-3/5 p-8 flex items-center justify-center bg-gray-50">
+                {previewDetection.snapshot_path ? (
+                  <img
+                    src={`${FLASK_URL}/${previewDetection.snapshot_path}`}
+                    alt={previewDetection.worker_name}
+                    className="w-full h-full max-h-[85vh] rounded-lg shadow-lg object-contain"
+                    onError={(e) => {
+                      e.target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="300"%3E%3Crect fill="%23ddd" width="400" height="300"/%3E%3Ctext fill="%23999" font-family="sans-serif" font-size="20" dy="10.5" font-weight="bold" x="50%25" y="50%25" text-anchor="middle"%3EImage not available%3C/text%3E%3C/svg%3E';
+                    }}
+                  />
+                ) : (
+                  <div className="w-full h-64 flex items-center justify-center bg-gray-200 rounded-lg">
+                    <p className="text-gray-500">No image available</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Details Section - Right */}
+              <div className="lg:w-2/5 p-8 overflow-y-auto">
+                <div className="space-y-6">
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-500 mb-2">Worker Name</h4>
+                    <p className="text-xl font-semibold">{previewDetection.worker_name || "—"}</p>
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-500 mb-2">Detection Status</h4>
+                    {previewDetection.ppe_compliant ? (
+                      <span className="inline-flex items-center px-4 py-2 rounded-full text-base font-medium bg-green-100 text-green-800">
+                        Compliant
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-4 py-2 rounded-full text-base font-medium bg-red-100 text-red-800">
+                        Violation
+                      </span>
+                    )}
+                  </div>
+
+                  {previewDetection.confidence && (
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500 mb-2">Recognition Confidence</h4>
+                      <p className="text-lg">{(previewDetection.confidence * 100).toFixed(1)}%</p>
+                    </div>
+                  )}
+
+                  {(() => {
+                    if (!previewDetection.detected_at) return null;
+                    try {
+                      const timestampStr = previewDetection.detected_at;
+                      const utcString = timestampStr.endsWith('Z') ? timestampStr : timestampStr + 'Z';
+                      const detectedAt = new Date(utcString);
+                      if (!isNaN(detectedAt.getTime())) {
+                        const timeString = detectedAt.toLocaleTimeString('en-IN', { 
+                          hour: '2-digit', 
+                          minute: '2-digit',
+                          second: '2-digit',
+                          hour12: true,
+                          timeZone: 'Asia/Kolkata'
+                        });
+                        const dateString = detectedAt.toLocaleDateString('en-IN', {
+                          weekday: 'long',
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                          timeZone: 'Asia/Kolkata'
+                        });
+                        return (
+                          <div>
+                            <h4 className="text-sm font-medium text-gray-500 mb-2">Detected At</h4>
+                            <p className="text-lg">{dateString}</p>
+                            <p className="text-lg text-gray-600">{timeString} IST</p>
+                            <p className="text-sm text-gray-500 mt-1">{getTimeAgo(detectedAt)}</p>
+                          </div>
+                        );
+                      }
+                    } catch (e) {
+                      return null;
+                    }
+                    return null;
+                  })()}
+
+                  {previewDetection.ppe_items && (
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500 mb-3">PPE Items</h4>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className={`p-3 rounded-lg ${previewDetection.ppe_items.helmet ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                          <span className="font-semibold">Helmet:</span> {previewDetection.ppe_items.helmet ? '✓ Detected' : '✗ Missing'}
+                        </div>
+                        <div className={`p-3 rounded-lg ${previewDetection.ppe_items.gloves ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                          <span className="font-semibold">Gloves:</span> {previewDetection.ppe_items.gloves ? '✓ Detected' : '✗ Missing'}
+                        </div>
+                        <div className={`p-3 rounded-lg ${previewDetection.ppe_items.boots ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                          <span className="font-semibold">Boots:</span> {previewDetection.ppe_items.boots ? '✓ Detected' : '✗ Missing'}
+                        </div>
+                        <div className={`p-3 rounded-lg ${previewDetection.ppe_items.jacket ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                          <span className="font-semibold">Jacket:</span> {previewDetection.ppe_items.jacket ? '✓ Detected' : '✗ Missing'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {previewDetection.camera_source && (
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-500 mb-2">Camera Source</h4>
+                      <p className="text-lg">{previewDetection.camera_source === 'rtsp' ? 'RTSP Camera' : 'Webcam'}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

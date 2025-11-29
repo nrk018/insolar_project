@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from '../utils/axiosConfig';
+import { stopCamera } from '../utils/cameraUtils';
 
 const TopNavbar = ({ isAdmin = false }) => {
   const navigate = useNavigate();
@@ -38,10 +39,21 @@ const TopNavbar = ({ isAdmin = false }) => {
     };
   }, [isDropdownOpen]);
 
-  const handleLogout = () => {
-    axios.post('/logout')
-      .then(() => navigate('/'))
-      .catch(error => console.error('Error logging out:', error));
+  const handleLogout = async () => {
+    try {
+      // Stop camera before logging out - use Promise.race to ensure it doesn't hang
+      const stopPromise = stopCamera();
+      const timeoutPromise = new Promise(resolve => setTimeout(resolve, 2000));
+      await Promise.race([stopPromise, timeoutPromise]);
+      
+      // Then proceed with logout
+      await axios.post('/logout');
+      navigate('/');
+    } catch (error) {
+      console.error('Error logging out:', error);
+      // Navigate anyway even if camera stop fails
+      navigate('/');
+    }
   };
 
   // No need for extractNameFromImage - profilePhoto now contains full URL

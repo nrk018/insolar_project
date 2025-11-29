@@ -97,6 +97,8 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
   const user = process.env.EMAIL_USER;
   const pass = process.env.EMAIL_PASS;
 
+  console.log(`[EMAIL SEND] Attempting to send email for worker ${workerId} to ${recipients.length} recipient(s): ${recipients.join(", ")}`);
+
   const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
     port: 587,
@@ -112,6 +114,8 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
       html,
     });
 
+    console.log(`[EMAIL SEND SUCCESS] Email sent successfully for worker ${workerId} to ${recipients.length} recipient(s)`);
+
     for (const r of recipients) {
       await logNotification({
         worker_id: workerId,
@@ -126,6 +130,7 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
     return { ok: true, reason: "Sent successfully" };
   } catch (err) {
     const reason = err.message || "SMTP error";
+    console.error(`[EMAIL SEND FAILED] Failed to send email for worker ${workerId}: ${reason}`);
     for (const r of recipients) {
       await logNotification({
         worker_id: workerId,
@@ -163,6 +168,7 @@ export async function maybeNotifyForPpe({
   dailyViolations,
   totalViolations,
   streak,
+  ppeItems = {}, // PPE items status: { helmet: true/false, gloves: true/false, boots: true/false, jacket: true/false }
 }) {
   if (dailyViolations <= 0) {
     return { sms: false, email: false };
@@ -170,9 +176,31 @@ export async function maybeNotifyForPpe({
 
   const today = new Date().toISOString().split("T")[0];
 
-  // Check if worker has already been notified today
-  // Note: If last_notified_date column doesn't exist yet, this will return null
-  // and we'll proceed with notification (backward compatibility)
+  // FIRST: Check notifications table to see if email was already sent today
+  // This is more reliable than checking last_notified_date due to race conditions
+  const { data: emailNotifications, error: emailCheckErr } = await supabase
+    .from("notifications")
+    .select("id")
+    .eq("worker_id", worker.worker_id)
+    .eq("type", "Email")
+    .eq("status", "Sent")
+    .gte("timestamp", `${today}T00:00:00`)
+    .lte("timestamp", `${today}T23:59:59`)
+    .limit(1);
+
+  if (emailCheckErr) {
+    console.error("Error checking email notifications:", emailCheckErr);
+  }
+
+  // If email was already sent today, skip notification
+  if (emailNotifications && emailNotifications.length > 0) {
+    console.log(
+      `[DUPLICATE PREVENTION] Worker ${worker.worker_id} already received email today (${today}). Found ${emailNotifications.length} sent email(s) in notifications table. Skipping.`
+    );
+    return { sms: false, email: false, reason: "Email already sent today" };
+  }
+
+  // SECOND: Check last_notified_date as additional safeguard
   const { data: workerRows, error: workerErr } = await supabase
     .from("workers")
     .select("last_notified_date")
@@ -197,7 +225,7 @@ export async function maybeNotifyForPpe({
 
   if (alreadyNotifiedToday) {
     console.log(
-      `Worker ${worker.worker_id} already notified today (${today}). Skipping notification.`
+      `[DUPLICATE PREVENTION] Worker ${worker.worker_id} already notified today (${today}) - last_notified_date check. Skipping notification.`
     );
     return { sms: false, email: false, reason: "Already notified today" };
   }
@@ -227,6 +255,32 @@ export async function maybeNotifyForPpe({
   let smsOk = false;
   let emailOk = false;
 
+  // Determine which PPE items are missing
+  const missingItems = [];
+  const itemNames = {
+    helmet: "Helmet",
+    gloves: "Gloves",
+    boots: "Boots",
+    jacket: "Jacket"
+  };
+
+  // Check each PPE item - if not detected (false or undefined), it's missing
+  if (ppeItems.helmet !== true) missingItems.push("Helmet");
+  if (ppeItems.gloves !== true) missingItems.push("Gloves");
+  if (ppeItems.boots !== true) missingItems.push("Boots");
+  if (ppeItems.jacket !== true) missingItems.push("Jacket");
+
+  // Format violation message
+  let violationMessage = "";
+  if (missingItems.length === 1) {
+    violationMessage = `1 violation of not wearing ${missingItems[0]}`;
+  } else if (missingItems.length > 1) {
+    const itemsList = missingItems.slice(0, -1).join(", ") + " and " + missingItems[missingItems.length - 1];
+    violationMessage = `${missingItems.length} violations of not wearing ${itemsList}`;
+  } else {
+    violationMessage = "PPE violation detected";
+  }
+
   const msg = `Worker ${worker.name} (${worker.worker_id}) has ${dailyViolations} PPE violations today. Total: ${totalViolations}, Streak: ${streak}.`;
 
   // Send SMS if threshold not reached and mobile number available
@@ -235,38 +289,84 @@ export async function maybeNotifyForPpe({
     smsOk = smsRes.ok;
   }
 
-  // Email to supervisors + worker
-  const defaultRecipientsRaw = process.env.PPE_EMAIL_RECIPIENTS || "";
-  const defaultRecipients = defaultRecipientsRaw
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-  const recipients = new Set(defaultRecipients);
+  // Email ONLY to the worker (person) - not to supervisors
+  // Only send email if worker has an email address
+  const recipients = new Set();
   if (worker.email) {
     recipients.add(worker.email);
   }
 
+  // Personalized email message
+  const currentTime = new Date().toLocaleString('en-US', { 
+    weekday: 'long', 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric', 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  });
+
+  // Format the main message as requested: "Hello [name]! Violation time, not wearing [items]"
+  const notWearingList = missingItems.length > 0 ? missingItems.join(", ") : "Unknown items";
+  const mainMessage = `Hello ${worker.name}! Violation time, not wearing ${notWearingList}`;
+
   const subject = "PPE Violation Alert";
   const html = `
     <html>
-      <body>
-        <h2>PPE Violation Alert</h2>
-        <p>${msg}</p>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #d32f2f;">PPE Violation Alert</h2>
+          <p style="font-size: 16px;">${mainMessage}</p>
+          <p style="font-size: 14px; color: #666; margin-top: 10px;">
+            <strong>Time:</strong> ${currentTime}
+          </p>
+          <p style="font-size: 14px; color: #d32f2f; font-weight: bold; margin-top: 15px;">
+            ${violationMessage}
+          </p>
+          <hr style="border: 1px solid #eee; margin: 20px 0;">
+          <p style="color: #666; font-size: 14px;">
+            Please ensure you wear all required PPE items: Helmet, Gloves, Boots, and Jacket for your safety.
+          </p>
+        </div>
       </body>
     </html>
   `;
 
   // Send email if recipients available
+  // FINAL CHECK: One more verification right before sending to prevent race conditions
   if (recipients.size > 0) {
-    const emailRes = await sendEmail({
-      workerId: worker.worker_id,
-      workerName: worker.name,
-      recipients: Array.from(recipients),
-      subject,
-      html,
-    });
-    emailOk = emailRes.ok;
+    // Final check of notifications table right before sending (prevents race condition)
+    const { data: finalEmailCheck, error: finalCheckErr } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("worker_id", worker.worker_id)
+      .eq("type", "Email")
+      .eq("status", "Sent")
+      .gte("timestamp", `${today}T00:00:00`)
+      .lte("timestamp", `${today}T23:59:59`)
+      .limit(1);
+
+    if (finalCheckErr) {
+      console.error("[NOTIFICATION] Error in final email check:", finalCheckErr);
+    }
+
+    if (finalEmailCheck && finalEmailCheck.length > 0) {
+      console.log(
+        `[DUPLICATE PREVENTION] Final check: Worker ${worker.worker_id} already has sent email in notifications table. Skipping email send.`
+      );
+      emailOk = false; // Don't send, but don't return early (SMS might still be sent)
+    } else {
+      // All checks passed, send email
+      console.log(`[NOTIFICATION] Sending email to ${recipients.size} recipient(s) for worker ${worker.worker_id}`);
+      const emailRes = await sendEmail({
+        workerId: worker.worker_id,
+        workerName: worker.name,
+        recipients: Array.from(recipients),
+        subject,
+        html,
+      });
+      emailOk = emailRes.ok;
+    }
   }
 
   // Update last_notified_date if either SMS or Email was sent successfully
@@ -274,7 +374,100 @@ export async function maybeNotifyForPpe({
     await updateLastNotifiedDate(worker.worker_id, today);
   }
 
+  // Log final result
+  if (emailOk) {
+    console.log(`[NOTIFICATION COMPLETE] Successfully sent email notification for worker ${worker.worker_id} on ${today}`);
+  } else if (recipients.size > 0) {
+    console.log(`[NOTIFICATION SKIPPED] Email notification was skipped for worker ${worker.worker_id} on ${today} (likely duplicate prevention)`);
+  }
+
   return { sms: smsOk, email: emailOk };
+}
+
+// Manual email send function - bypasses duplicate checks (for admin manual send)
+export async function sendManualEmail({
+  worker,
+  ppeItems = {},
+}) {
+  const today = new Date().toISOString().split("T")[0];
+
+  // Determine which PPE items are missing
+  const missingItems = [];
+  if (ppeItems.helmet !== true) missingItems.push("Helmet");
+  if (ppeItems.gloves !== true) missingItems.push("Gloves");
+  if (ppeItems.boots !== true) missingItems.push("Boots");
+  if (ppeItems.jacket !== true) missingItems.push("Jacket");
+
+  // Format violation message
+  let violationMessage = "";
+  if (missingItems.length === 1) {
+    violationMessage = `1 violation of not wearing ${missingItems[0]}`;
+  } else if (missingItems.length > 1) {
+    const itemsList = missingItems.slice(0, -1).join(", ") + " and " + missingItems[missingItems.length - 1];
+    violationMessage = `${missingItems.length} violations of not wearing ${itemsList}`;
+  } else {
+    violationMessage = "PPE violation detected";
+  }
+
+  // Email ONLY to the worker (person) - not to supervisors
+  const recipients = new Set();
+  if (worker.email) {
+    recipients.add(worker.email);
+  } else {
+    return { ok: false, reason: "Worker has no email address" };
+  }
+
+  // Personalized email message
+  const currentTime = new Date().toLocaleString('en-US', { 
+    weekday: 'long', 
+    year: 'numeric', 
+    month: 'long', 
+    day: 'numeric', 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  });
+
+  const notWearingList = missingItems.length > 0 ? missingItems.join(", ") : "Unknown items";
+  const mainMessage = `Hello ${worker.name}! Violation time, not wearing ${notWearingList}`;
+
+  const subject = "PPE Violation Alert (Manual)";
+  const html = `
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #d32f2f;">PPE Violation Alert</h2>
+          <p style="font-size: 16px;">${mainMessage}</p>
+          <p style="font-size: 14px; color: #666; margin-top: 10px;">
+            <strong>Time:</strong> ${currentTime}
+          </p>
+          <p style="font-size: 14px; color: #d32f2f; font-weight: bold; margin-top: 15px;">
+            ${violationMessage}
+          </p>
+          <hr style="border: 1px solid #eee; margin: 20px 0;">
+          <p style="color: #666; font-size: 14px;">
+            Please ensure you wear all required PPE items: Helmet, Gloves, Boots, and Jacket for your safety.
+          </p>
+        </div>
+      </body>
+    </html>
+  `;
+
+  // Send email (bypass duplicate checks for manual send)
+  console.log(`[MANUAL EMAIL] Sending email to ${worker.name} (${worker.worker_id}) - bypassing duplicate checks`);
+  const emailRes = await sendEmail({
+    workerId: worker.worker_id,
+    workerName: worker.name,
+    recipients: Array.from(recipients),
+    subject,
+    html,
+  });
+
+  // Update last_notified_date if email was sent successfully
+  if (emailRes.ok) {
+    await updateLastNotifiedDate(worker.worker_id, today);
+  }
+
+  return { ok: emailRes.ok, reason: emailRes.reason };
 }
 
 

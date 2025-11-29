@@ -2,6 +2,7 @@ import { faPencil } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useState, useEffect } from "react";
 import axios from '../utils/axiosConfig';
+import { stopCamera } from '../utils/cameraUtils';
 import { useNavigate } from 'react-router-dom';
 
 const AdminSettings = () => {
@@ -79,15 +80,22 @@ const AdminSettings = () => {
       });
   };
 
-  const handleLogout = () => {
-    axios.post('/logout')
-      .then(response => {
-        console.log("Logged out successfully:", response.data);
-        navigate('/');
-      })
-      .catch(error => {
-        console.error("Error logging out:", error);
-      });
+  const handleLogout = async () => {
+    try {
+      // Stop camera before logging out - use Promise.race to ensure it doesn't hang
+      const stopPromise = stopCamera();
+      const timeoutPromise = new Promise(resolve => setTimeout(resolve, 2000));
+      await Promise.race([stopPromise, timeoutPromise]);
+      
+      // Then proceed with logout
+      const response = await axios.post('/logout');
+      console.log("Logged out successfully:", response.data);
+      navigate('/');
+    } catch (error) {
+      console.error("Error logging out:", error);
+      // Navigate anyway even if camera stop fails
+      navigate('/');
+    }
   };
 
   return (
