@@ -19,7 +19,7 @@ import {
     listPpeWorkers,
     listDefaulters,
 } from "./ppeService.js";
-import { maybeNotifyForPpe, sendManualEmail } from "./notificationService.js";
+import { maybeNotifyForPpe, sendManualEmail, sendManualSms } from "./notificationService.js";
 
 dotenv.config();
 
@@ -1139,6 +1139,46 @@ app.post("/api/ppe/send-email", authenticateToken, async (req, res) => {
         }
     } catch (error) {
         console.error("PPE /api/ppe/send-email error:", error);
+        return res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+// Manual SMS send endpoint (bypasses duplicate checks)
+app.post("/api/ppe/send-sms", authenticateToken, async (req, res) => {
+    try {
+        const { worker_name, ppe_items } = req.body;
+        
+        if (!worker_name) {
+            return res.status(400).json({ error: "worker_name is required" });
+        }
+
+        const worker = await resolveWorkerFromName(worker_name);
+        if (!worker) {
+            return res.status(404).json({ error: "Worker not found for given name" });
+        }
+
+        if (!worker.mobile) {
+            return res.status(400).json({ error: "Worker has no mobile number" });
+        }
+
+        const result = await sendManualSms({
+            worker,
+            ppeItems: ppe_items || {},
+        });
+
+        if (result.ok) {
+            return res.status(200).json({ 
+                message: "SMS sent successfully",
+                sms_sent: true 
+            });
+        } else {
+            return res.status(500).json({ 
+                error: result.reason || "Failed to send SMS",
+                sms_sent: false 
+            });
+        }
+    } catch (error) {
+        console.error("PPE /api/ppe/send-sms error:", error);
         return res.status(500).json({ error: "Internal Server Error" });
     }
 });

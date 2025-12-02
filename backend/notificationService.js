@@ -23,12 +23,72 @@ async function logNotification({
   });
 }
 
+// Helper function to format phone number for SMSIdea API
+function formatPhoneNumber(phone) {
+  if (!phone) return null;
+  
+  // Remove all non-digit characters (spaces, dashes, +, etc.)
+  let cleaned = phone.toString().replace(/\D/g, '');
+  
+  // Remove country code if present (91 for India)
+  if (cleaned.startsWith('91') && cleaned.length === 12) {
+    cleaned = cleaned.substring(2);
+  }
+  
+  // Validate: Should be 10 digits and start with 6, 7, 8, or 9
+  if (cleaned.length === 10 && /^[6-9]/.test(cleaned)) {
+    return cleaned;
+  }
+  
+  // If not valid, return null
+  console.warn(`[SMS] Invalid phone number format: ${phone} (cleaned: ${cleaned})`);
+  return null;
+}
+
 async function sendSms(toNumber, message, workerId) {
   const url = "https://www.smsidea.co.in/sendbulksms.aspx";
+
+  // Format phone number before sending
+  const formattedNumber = formatPhoneNumber(toNumber);
+  if (!formattedNumber) {
+    const reason = `Invalid phone number format: ${toNumber}. Must be 10-digit Indian mobile number.`;
+    console.error(`[SMS ERROR] ${reason}`);
+    await logNotification({
+      worker_id: workerId,
+      type: "SMS",
+      recipient: toNumber,
+      message,
+      status: "Failed",
+      reason,
+    });
+    return { ok: false, reason };
+  }
 
   const mobile = process.env.SMSIDEA_USERNAME;
   const password = process.env.SMSIDEA_PASSWORD;
   const senderid = process.env.SMSIDEA_SENDER_ID;
+
+  // Check if SMS credentials are configured
+  if (!mobile || !password || !senderid) {
+    const missing = [];
+    if (!mobile) missing.push("SMSIDEA_USERNAME");
+    if (!password) missing.push("SMSIDEA_PASSWORD");
+    if (!senderid) missing.push("SMSIDEA_SENDER_ID");
+    console.error(`[SMS ERROR] Missing SMS credentials in .env file: ${missing.join(", ")}`);
+    await logNotification({
+      worker_id: workerId,
+      type: "SMS",
+      recipient: toNumber,
+      message,
+      status: "Failed",
+      reason: `Missing credentials: ${missing.join(", ")}`,
+    });
+    return { ok: false, reason: `Missing SMS credentials: ${missing.join(", ")}` };
+  }
+
+  console.log(`[SMS SEND] Original number: ${toNumber}, Formatted: ${formattedNumber}`);
+  console.log(`[SMS SEND] Sending SMS to ${formattedNumber} for worker ${workerId}`);
+  console.log(`[SMS SEND] Using sender ID: ${senderid}`);
 
   const payload = {
     mobile,
@@ -38,45 +98,74 @@ async function sendSms(toNumber, message, workerId) {
     message: [
       {
         text: message,
-        to: toNumber,
+        to: formattedNumber, // Use formatted number
         scheduledate: "",
       },
     ],
   };
 
   try {
+    console.log(`[SMS SEND] Calling SMS API: ${url}`);
+    console.log(`[SMS SEND] Payload:`, JSON.stringify(payload, null, 2));
     const response = await axios.get(url, {
       params: { data: JSON.stringify(payload) },
-      timeout: 5000,
+      timeout: 10000, // Increased timeout to 10 seconds
     });
     const text = String(response.data || "").trim();
+    console.log(`[SMS RESPONSE] Status: ${response.status}, Response: ${text}`);
+    console.log(`[SMS RESPONSE] Full response data:`, response.data);
 
-    if (
-      response.status === 200 &&
-      (text.includes("000 : success") || text.includes("1 SMS Sent"))
-    ) {
+    // Check for success indicators
+    const successIndicators = [
+      "000 : success",
+      "1 SMS Sent",
+      "success",
+      "sent successfully",
+      "message sent"
+    ];
+    
+    const isSuccess = response.status === 200 && 
+      successIndicators.some(indicator => text.toLowerCase().includes(indicator.toLowerCase()));
+
+    if (isSuccess) {
+      console.log(`[SMS SUCCESS] SMS sent successfully to ${formattedNumber} (original: ${toNumber})`);
       await logNotification({
         worker_id: workerId,
         type: "SMS",
         recipient: toNumber,
         message,
         status: "Sent",
-        reason: "Sent successfully",
+        reason: `Sent successfully - API Response: ${text}`,
       });
       return { ok: true, reason: "Sent successfully" };
     }
 
+    // Check for common error codes
+    let errorReason = text || "Unknown error";
+    if (text.includes("Invalid") || text.includes("invalid")) {
+      errorReason = `Invalid credentials or parameters: ${text}`;
+    } else if (text.includes("balance") || text.includes("Balance")) {
+      errorReason = `Insufficient balance: ${text}`;
+    } else if (text.includes("sender") || text.includes("Sender")) {
+      errorReason = `Invalid sender ID: ${text}`;
+    } else if (text.includes("mobile") || text.includes("Mobile")) {
+      errorReason = `Invalid mobile number: ${text}`;
+    }
+
+    console.error(`[SMS FAILED] API returned error: ${errorReason}`);
     await logNotification({
       worker_id: workerId,
       type: "SMS",
       recipient: toNumber,
       message,
       status: "Failed",
-      reason: text || "Unknown error",
+      reason: errorReason,
     });
-    return { ok: false, reason: text || "Unknown error" };
+    return { ok: false, reason: errorReason };
   } catch (err) {
     const reason = err.message || "Network error";
+    console.error(`[SMS ERROR] Exception while sending SMS: ${reason}`);
+    console.error(`[SMS ERROR] Full error:`, err);
     await logNotification({
       worker_id: workerId,
       type: "SMS",
@@ -94,10 +183,17 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
     return { ok: false, reason: "No recipients" };
   }
 
+  // Remove duplicates from recipients array to ensure we only send one email per unique address
+  const uniqueRecipients = [...new Set(recipients.map(r => r.toLowerCase().trim()))];
+  
+  if (uniqueRecipients.length === 0) {
+    return { ok: false, reason: "No valid recipients after deduplication" };
+  }
+
   const user = process.env.EMAIL_USER;
   const pass = process.env.EMAIL_PASS;
 
-  console.log(`[EMAIL SEND] Attempting to send email for worker ${workerId} to ${recipients.length} recipient(s): ${recipients.join(", ")}`);
+  console.log(`[EMAIL SEND] Attempting to send email for worker ${workerId} to ${uniqueRecipients.length} unique recipient(s): ${uniqueRecipients.join(", ")}`);
 
   const transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
@@ -107,16 +203,18 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
   });
 
   try {
+    // Send ONE email to all unique recipients
     await transporter.sendMail({
       from: user,
-      to: recipients.join(","),
+      to: uniqueRecipients.join(","),
       subject,
       html,
     });
 
-    console.log(`[EMAIL SEND SUCCESS] Email sent successfully for worker ${workerId} to ${recipients.length} recipient(s)`);
+    console.log(`[EMAIL SEND SUCCESS] Email sent successfully for worker ${workerId} to ${uniqueRecipients.length} unique recipient(s)`);
 
-    for (const r of recipients) {
+    // Log notification for each unique recipient
+    for (const r of uniqueRecipients) {
       await logNotification({
         worker_id: workerId,
         type: "Email",
@@ -131,7 +229,7 @@ async function sendEmail({ workerId, workerName, recipients, subject, html }) {
   } catch (err) {
     const reason = err.message || "SMTP error";
     console.error(`[EMAIL SEND FAILED] Failed to send email for worker ${workerId}: ${reason}`);
-    for (const r of recipients) {
+    for (const r of uniqueRecipients) {
       await logNotification({
         worker_id: workerId,
         type: "Email",
@@ -177,27 +275,47 @@ export async function maybeNotifyForPpe({
   const today = new Date().toISOString().split("T")[0];
 
   // FIRST: Check notifications table to see if email was already sent today
+  // Check for ANY email notification (Sent, Failed, or Pending) to prevent duplicates
   // This is more reliable than checking last_notified_date due to race conditions
   const { data: emailNotifications, error: emailCheckErr } = await supabase
     .from("notifications")
-    .select("id")
+    .select("id, status, timestamp")
     .eq("worker_id", worker.worker_id)
     .eq("type", "Email")
-    .eq("status", "Sent")
     .gte("timestamp", `${today}T00:00:00`)
     .lte("timestamp", `${today}T23:59:59`)
-    .limit(1);
+    .order("timestamp", { ascending: false })
+    .limit(5);
 
   if (emailCheckErr) {
     console.error("Error checking email notifications:", emailCheckErr);
   }
 
-  // If email was already sent today, skip notification
+  // If email was already sent today (status = "Sent"), skip notification
   if (emailNotifications && emailNotifications.length > 0) {
-    console.log(
-      `[DUPLICATE PREVENTION] Worker ${worker.worker_id} already received email today (${today}). Found ${emailNotifications.length} sent email(s) in notifications table. Skipping.`
-    );
-    return { sms: false, email: false, reason: "Email already sent today" };
+    const sentEmails = emailNotifications.filter(n => n.status === "Sent");
+    if (sentEmails.length > 0) {
+      console.log(
+        `[DUPLICATE PREVENTION] Worker ${worker.worker_id} already received email today (${today}). Found ${sentEmails.length} sent email(s) in notifications table. Skipping.`
+      );
+      return { sms: false, email: false, reason: "Email already sent today" };
+    }
+    // Also check if there's a recent pending email (within last 2 minutes) to prevent race conditions
+    const recentPending = emailNotifications.filter(n => {
+      if (n.status !== "Sent") {
+        const notifTime = new Date(n.timestamp);
+        const now = new Date();
+        const diffMinutes = (now - notifTime) / (1000 * 60);
+        return diffMinutes < 2; // Within last 2 minutes
+      }
+      return false;
+    });
+    if (recentPending.length > 0) {
+      console.log(
+        `[DUPLICATE PREVENTION] Worker ${worker.worker_id} has a recent email notification being processed. Skipping to prevent duplicates.`
+      );
+      return { sms: false, email: false, reason: "Email notification already in progress" };
+    }
   }
 
   // SECOND: Check last_notified_date as additional safeguard
@@ -230,28 +348,6 @@ export async function maybeNotifyForPpe({
     return { sms: false, email: false, reason: "Already notified today" };
   }
 
-  // Threshold from settings
-  const { data: settingsRows } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "email_threshold")
-    .limit(1);
-  const threshold =
-    settingsRows && settingsRows.length > 0
-      ? settingsRows[0].value
-      : 4;
-
-  // How many SMS already sent today? (for threshold check)
-  const { data: smsCountRows } = await supabase
-    .from("notifications")
-    .select("id")
-    .eq("worker_id", worker.worker_id)
-    .eq("type", "SMS")
-    .gte("timestamp", `${today}T00:00:00`)
-    .lte("timestamp", `${today}T23:59:59`);
-
-  const smsAlreadyToday = smsCountRows ? smsCountRows.length : 0;
-
   let smsOk = false;
   let emailOk = false;
 
@@ -281,19 +377,71 @@ export async function maybeNotifyForPpe({
     violationMessage = "PPE violation detected";
   }
 
-  const msg = `Worker ${worker.name} (${worker.worker_id}) has ${dailyViolations} PPE violations today. Total: ${totalViolations}, Streak: ${streak}.`;
+  // Check if SMS was already sent today (similar to email duplicate prevention)
+  const { data: smsNotifications, error: smsCheckErr } = await supabase
+    .from("notifications")
+    .select("id, status, timestamp")
+    .eq("worker_id", worker.worker_id)
+    .eq("type", "SMS")
+    .eq("status", "Sent")
+    .gte("timestamp", `${today}T00:00:00`)
+    .lte("timestamp", `${today}T23:59:59`)
+    .limit(1);
 
-  // Send SMS if threshold not reached and mobile number available
-  if (smsAlreadyToday < threshold && worker.mobile) {
-    const smsRes = await sendSms(worker.mobile, msg, worker.worker_id);
-    smsOk = smsRes.ok;
+  if (smsCheckErr) {
+    console.error("Error checking SMS notifications:", smsCheckErr);
+  }
+
+  // Format SMS message to match email format: "Hello [name]! Violation time, not wearing [items]"
+  const notWearingList = missingItems.length > 0 ? missingItems.join(", ") : "Unknown items";
+  const smsMessage = `Hello ${worker.name}! Violation time, not wearing ${notWearingList}`;
+
+  // Send SMS only if not already sent today and mobile number is available
+  console.log(`[SMS CHECK] Worker ${worker.worker_id}: SMS already sent today: ${smsNotifications && smsNotifications.length > 0}, Has mobile: ${!!worker.mobile}, Mobile number: ${worker.mobile || 'N/A'}`);
+  
+  if (smsNotifications && smsNotifications.length > 0) {
+    console.log(`[SMS SKIP] Worker ${worker.worker_id} already received SMS today (${today}). Skipping SMS.`);
+  } else if (worker.mobile) {
+    // Final check right before sending to prevent race conditions
+    const { data: finalSmsCheck, error: finalSmsCheckErr } = await supabase
+      .from("notifications")
+      .select("id, status, timestamp")
+      .eq("worker_id", worker.worker_id)
+      .eq("type", "SMS")
+      .eq("status", "Sent")
+      .gte("timestamp", `${today}T00:00:00`)
+      .lte("timestamp", `${today}T23:59:59`)
+      .limit(1);
+
+    if (finalSmsCheckErr) {
+      console.error("[SMS] Error in final SMS check:", finalSmsCheckErr);
+    }
+
+    if (finalSmsCheck && finalSmsCheck.length > 0) {
+      console.log(`[SMS SKIP] Final check: Worker ${worker.worker_id} already has sent SMS in notifications table. Skipping SMS send.`);
+    } else {
+      console.log(`[SMS SEND] Attempting to send SMS to ${worker.mobile} for worker ${worker.worker_id}`);
+      const smsRes = await sendSms(worker.mobile, smsMessage, worker.worker_id);
+      smsOk = smsRes.ok;
+      if (smsOk) {
+        console.log(`[SMS SUCCESS] SMS sent successfully to ${worker.mobile} for worker ${worker.worker_id}`);
+      } else {
+        console.error(`[SMS FAILED] Failed to send SMS to ${worker.mobile} for worker ${worker.worker_id}: ${smsRes.reason}`);
+      }
+    }
+  } else {
+    console.log(`[SMS SKIP] Worker ${worker.worker_id} has no mobile number`);
   }
 
   // Email ONLY to the worker (person) - not to supervisors
   // Only send email if worker has an email address
+  // Normalize email addresses (lowercase, trim) to prevent duplicates
   const recipients = new Set();
   if (worker.email) {
-    recipients.add(worker.email);
+    const normalizedEmail = worker.email.toLowerCase().trim();
+    if (normalizedEmail) {
+      recipients.add(normalizedEmail);
+    }
   }
 
   // Personalized email message
@@ -307,7 +455,7 @@ export async function maybeNotifyForPpe({
   });
 
   // Format the main message as requested: "Hello [name]! Violation time, not wearing [items]"
-  const notWearingList = missingItems.length > 0 ? missingItems.join(", ") : "Unknown items";
+  // Reuse notWearingList already declared above for SMS
   const mainMessage = `Hello ${worker.name}! Violation time, not wearing ${notWearingList}`;
 
   const subject = "PPE Violation Alert";
@@ -336,28 +484,55 @@ export async function maybeNotifyForPpe({
   // FINAL CHECK: One more verification right before sending to prevent race conditions
   if (recipients.size > 0) {
     // Final check of notifications table right before sending (prevents race condition)
+    // Check for any sent emails today OR recent pending emails
     const { data: finalEmailCheck, error: finalCheckErr } = await supabase
       .from("notifications")
-      .select("id")
+      .select("id, status, timestamp")
       .eq("worker_id", worker.worker_id)
       .eq("type", "Email")
-      .eq("status", "Sent")
       .gte("timestamp", `${today}T00:00:00`)
       .lte("timestamp", `${today}T23:59:59`)
-      .limit(1);
+      .order("timestamp", { ascending: false })
+      .limit(5);
 
     if (finalCheckErr) {
       console.error("[NOTIFICATION] Error in final email check:", finalCheckErr);
     }
 
+    let shouldSkip = false;
     if (finalEmailCheck && finalEmailCheck.length > 0) {
-      console.log(
-        `[DUPLICATE PREVENTION] Final check: Worker ${worker.worker_id} already has sent email in notifications table. Skipping email send.`
-      );
+      // Check for sent emails
+      const sentEmails = finalEmailCheck.filter(n => n.status === "Sent");
+      if (sentEmails.length > 0) {
+        console.log(
+          `[DUPLICATE PREVENTION] Final check: Worker ${worker.worker_id} already has sent email in notifications table. Skipping email send.`
+        );
+        shouldSkip = true;
+      } else {
+        // Check for recent pending emails (within last 2 minutes)
+        const recentPending = finalEmailCheck.filter(n => {
+          if (n.status !== "Sent") {
+            const notifTime = new Date(n.timestamp);
+            const now = new Date();
+            const diffMinutes = (now - notifTime) / (1000 * 60);
+            return diffMinutes < 2;
+          }
+          return false;
+        });
+        if (recentPending.length > 0) {
+          console.log(
+            `[DUPLICATE PREVENTION] Final check: Worker ${worker.worker_id} has recent email notification being processed. Skipping email send.`
+          );
+          shouldSkip = true;
+        }
+      }
+    }
+
+    if (shouldSkip) {
       emailOk = false; // Don't send, but don't return early (SMS might still be sent)
     } else {
       // All checks passed, send email
-      console.log(`[NOTIFICATION] Sending email to ${recipients.size} recipient(s) for worker ${worker.worker_id}`);
+      console.log(`[NOTIFICATION] Sending email to ${recipients.size} unique recipient(s) for worker ${worker.worker_id}`);
       const emailRes = await sendEmail({
         workerId: worker.worker_id,
         workerName: worker.name,
@@ -410,11 +585,17 @@ export async function sendManualEmail({
   }
 
   // Email ONLY to the worker (person) - not to supervisors
+  // Normalize email addresses (lowercase, trim) to prevent duplicates
   const recipients = new Set();
   if (worker.email) {
-    recipients.add(worker.email);
-  } else {
-    return { ok: false, reason: "Worker has no email address" };
+    const normalizedEmail = worker.email.toLowerCase().trim();
+    if (normalizedEmail) {
+      recipients.add(normalizedEmail);
+    }
+  }
+  
+  if (recipients.size === 0) {
+    return { ok: false, reason: "Worker has no valid email address" };
   }
 
   // Personalized email message
@@ -468,6 +649,41 @@ export async function sendManualEmail({
   }
 
   return { ok: emailRes.ok, reason: emailRes.reason };
+}
+
+// Manual SMS send function - bypasses duplicate checks (for admin manual send)
+export async function sendManualSms({
+  worker,
+  ppeItems = {},
+}) {
+  // Determine which PPE items are missing
+  const missingItems = [];
+  if (ppeItems.helmet !== true) missingItems.push("Helmet");
+  if (ppeItems.gloves !== true) missingItems.push("Gloves");
+  if (ppeItems.boots !== true) missingItems.push("Boots");
+  if (ppeItems.jacket !== true) missingItems.push("Jacket");
+
+  // Format SMS message to match email format: "Hello [name]! Violation time, not wearing [items]"
+  const notWearingList = missingItems.length > 0 ? missingItems.join(", ") : "Unknown items";
+  const smsMessage = `Hello ${worker.name}! Violation time, not wearing ${notWearingList}`;
+
+  // Check if worker has mobile number
+  if (!worker.mobile) {
+    return { ok: false, reason: "Worker has no mobile number" };
+  }
+
+  // Format and validate phone number
+  const formattedMobile = formatPhoneNumber(worker.mobile);
+  if (!formattedMobile) {
+    return { ok: false, reason: `Invalid phone number format: ${worker.mobile}. Must be 10-digit Indian mobile number.` };
+  }
+
+  // Send SMS (bypass duplicate checks for manual send)
+  console.log(`[MANUAL SMS] Sending SMS to ${worker.name} (${worker.worker_id}) - bypassing duplicate checks`);
+  console.log(`[MANUAL SMS] Original number: ${worker.mobile}, Formatted: ${formattedMobile}`);
+  const smsRes = await sendSms(worker.mobile, smsMessage, worker.worker_id);
+
+  return { ok: smsRes.ok, reason: smsRes.reason };
 }
 
 

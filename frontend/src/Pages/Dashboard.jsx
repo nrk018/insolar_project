@@ -33,6 +33,7 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [sendingEmails, setSendingEmails] = useState({});
+  const [sendingSms, setSendingSms] = useState({});
   const [isRunning, setIsRunning] = useState(false);
   const [cameraSource, setCameraSource] = useState('rtsp');
   const [flaskConnected, setFlaskConnected] = useState(false);
@@ -248,6 +249,36 @@ const Dashboard = () => {
       alert(`Failed to send email: ${err.response?.data?.error || err.message}`);
     } finally {
       setSendingEmails(prev => ({ ...prev, [detectionKey]: false }));
+    }
+  };
+
+  const handleSendSms = async (detection) => {
+    const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
+    setSendingSms(prev => ({ ...prev, [detectionKey]: true }));
+
+    try {
+      const ppeItems = {
+        helmet: detection.ppe_items?.helmet === true,
+        gloves: detection.ppe_items?.gloves === true,
+        boots: detection.ppe_items?.boots === true,
+        jacket: detection.ppe_items?.jacket === true,
+      };
+
+      const response = await axios.post('/api/ppe/send-sms', {
+        worker_name: detection.worker_name,
+        ppe_items: ppeItems,
+      });
+
+      if (response.data.sms_sent) {
+        alert(`SMS sent successfully to ${detection.worker_name}`);
+      } else {
+        throw new Error(response.data.error || 'Failed to send SMS');
+      }
+    } catch (err) {
+      console.error('Error sending SMS:', err);
+      alert(`Failed to send SMS: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setSendingSms(prev => ({ ...prev, [detectionKey]: false }));
     }
   };
 
@@ -505,6 +536,7 @@ const Dashboard = () => {
                     
                     const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
                     const isSendingEmail = sendingEmails[detectionKey];
+                    const isSendingSms = sendingSms[detectionKey];
                     const isCompliant = detection.ppe_compliant === true;
 
                     return (
@@ -554,13 +586,22 @@ const Dashboard = () => {
                           )}
                         </div>
                         
-                        <button
-                          onClick={() => handleSendEmail(detection)}
-                          disabled={isSendingEmail || isCompliant}
-                          className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
-                        >
-                          {isSendingEmail ? "Sending..." : "Send Email"}
-                        </button>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleSendEmail(detection)}
+                            disabled={isSendingEmail || isCompliant}
+                            className="px-3 py-1.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {isSendingEmail ? "Sending..." : "Send Email"}
+                          </button>
+                          <button
+                            onClick={() => handleSendSms(detection)}
+                            disabled={isSendingSms || isCompliant}
+                            className="px-3 py-1.5 text-xs bg-green-500 text-white rounded hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            {isSendingSms ? "Sending..." : "Send Message"}
+                          </button>
+                        </div>
                       </div>
                     );
                   })}

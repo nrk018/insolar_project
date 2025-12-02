@@ -10,6 +10,8 @@ import torch
 import pandas as pd
 import time
 import threading
+import glob
+import shutil
 from collections import deque
 from queue import Queue
 from flask import Flask, Response, request, jsonify, send_from_directory
@@ -1139,6 +1141,40 @@ def serve_snapshot(filename):
         traceback.print_exc()
         return jsonify({"error": "Snapshot not found"}), 404
 
+def cleanup_detection_snapshots():
+    """Background thread function to clear detection_snapshots folder every minute"""
+    while True:
+        try:
+            time.sleep(60)  # Wait 60 seconds (1 minute)
+            
+            if os.path.exists(DETECTION_SNAPSHOTS_FOLDER):
+                # Get all files in the folder
+                files = glob.glob(os.path.join(DETECTION_SNAPSHOTS_FOLDER, '*'))
+                file_count = len(files)
+                
+                if file_count > 0:
+                    # Remove all files in the folder
+                    for file_path in files:
+                        try:
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                        except Exception as e:
+                            print(f"[CLEANUP ERROR] Failed to remove {file_path}: {e}")
+                    
+                    print(f"[CLEANUP] Cleared {file_count} file(s) from {DETECTION_SNAPSHOTS_FOLDER}")
+                else:
+                    print(f"[CLEANUP] {DETECTION_SNAPSHOTS_FOLDER} is already empty")
+            else:
+                print(f"[CLEANUP WARNING] {DETECTION_SNAPSHOTS_FOLDER} does not exist")
+                # Recreate the folder if it doesn't exist
+                os.makedirs(DETECTION_SNAPSHOTS_FOLDER, exist_ok=True)
+        except Exception as e:
+            print(f"[CLEANUP ERROR] Unexpected error in cleanup thread: {e}")
+            import traceback
+            traceback.print_exc()
+
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("[VIDEO SERVER] Starting Flask video server...")
@@ -1149,5 +1185,11 @@ if __name__ == '__main__':
     print(f"[VIDEO SERVER] Server will run on: http://0.0.0.0:5000")
     print(f"[VIDEO SERVER] Camera will NOT auto-start - use /api/camera/start from web app")
     print("="*60 + "\n")
+    
+    # Start cleanup thread for detection_snapshots folder
+    cleanup_thread = threading.Thread(target=cleanup_detection_snapshots, daemon=True)
+    cleanup_thread.start()
+    print(f"[CLEANUP] Started background cleanup thread - will clear {DETECTION_SNAPSHOTS_FOLDER} every minute\n")
+    
     app.run(host='0.0.0.0', port=5000, threaded=True, debug=True)
 

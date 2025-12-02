@@ -32,6 +32,7 @@ const CameraMonitor = () => {
   const [flaskConnected, setFlaskConnected] = useState(false);
   const [recentDetections, setRecentDetections] = useState([]);
   const [sendingEmails, setSendingEmails] = useState({}); // Track which emails are being sent
+  const [sendingSms, setSendingSms] = useState({}); // Track which SMS are being sent
   const [previewDetection, setPreviewDetection] = useState(null);
   const videoRef = useRef(null);
 
@@ -207,6 +208,39 @@ const CameraMonitor = () => {
       alert(`Error sending email: ${err.response?.data?.error || err.message || 'Unknown error'}`);
     } finally {
       setSendingEmails(prev => {
+        const newState = { ...prev };
+        delete newState[detectionKey];
+        return newState;
+      });
+    }
+  };
+
+  const handleSendSms = async (detection) => {
+    const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
+    
+    // Prevent multiple clicks
+    if (sendingSms[detectionKey]) {
+      return;
+    }
+
+    setSendingSms(prev => ({ ...prev, [detectionKey]: true }));
+
+    try {
+      const response = await axios.post('/api/ppe/send-sms', {
+        worker_name: detection.worker_name,
+        ppe_items: detection.ppe_items || {}
+      });
+
+      if (response.data.sms_sent) {
+        alert(`SMS sent successfully to ${detection.worker_name}`);
+      } else {
+        alert(`Failed to send SMS: ${response.data.error || 'Unknown error'}`);
+      }
+    } catch (err) {
+      console.error('Error sending SMS:', err);
+      alert(`Error sending SMS: ${err.response?.data?.error || err.message || 'Unknown error'}`);
+    } finally {
+      setSendingSms(prev => {
         const newState = { ...prev };
         delete newState[detectionKey];
         return newState;
@@ -429,6 +463,7 @@ const CameraMonitor = () => {
               
               const detectionKey = `${detection.worker_name}_${detection.detected_at}`;
               const isSendingEmail = sendingEmails[detectionKey];
+              const isSendingSms = sendingSms[detectionKey];
 
               return (
                 <div
@@ -491,18 +526,31 @@ const CameraMonitor = () => {
                         ))}
                       </div>
                     )}
-                    {/* Send Email Button */}
-                    <button
-                      onClick={() => handleSendEmail(detection)}
-                      disabled={isSendingEmail}
-                      className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
-                        isSendingEmail
-                          ? 'bg-gray-400 text-white cursor-not-allowed'
-                          : 'bg-blue-500 text-white hover:bg-blue-600'
-                      }`}
-                    >
-                      {isSendingEmail ? 'Sending...' : 'Send Email'}
-                    </button>
+                    {/* Send Email and Send Message Buttons */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleSendEmail(detection)}
+                        disabled={isSendingEmail}
+                        className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                          isSendingEmail
+                            ? 'bg-gray-400 text-white cursor-not-allowed'
+                            : 'bg-blue-500 text-white hover:bg-blue-600'
+                        }`}
+                      >
+                        {isSendingEmail ? 'Sending...' : 'Send Email'}
+                      </button>
+                      <button
+                        onClick={() => handleSendSms(detection)}
+                        disabled={isSendingSms}
+                        className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                          isSendingSms
+                            ? 'bg-gray-400 text-white cursor-not-allowed'
+                            : 'bg-green-500 text-white hover:bg-green-600'
+                        }`}
+                      >
+                        {isSendingSms ? 'Sending...' : 'Send Message'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
