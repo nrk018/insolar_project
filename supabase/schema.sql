@@ -23,3 +23,20 @@ CREATE TABLE attendance (
     ppe_detection_confidence DECIMAL(5,2) DEFAULT 0.00,
     FOREIGN KEY (employee_id) REFERENCES users(employee_id) ON DELETE CASCADE
 );
+
+-- Recent detections from live camera feed (one row per worker, updated on each sighting)
+CREATE TABLE IF NOT EXISTS detection_events (
+    id SERIAL PRIMARY KEY,
+    worker_id TEXT,
+    worker_name TEXT NOT NULL UNIQUE,
+    confidence FLOAT,
+    ppe_compliant BOOLEAN,
+    ppe_items JSONB,
+    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    camera_source TEXT,
+    snapshot_path TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_detection_events_worker_id ON detection_events(worker_id);
+CREATE INDEX IF NOT EXISTS idx_detection_events_detected_at ON detection_events(detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_detection_events_worker_name ON detection_events(worker_name);

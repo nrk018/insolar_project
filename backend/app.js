@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
-import { createClient } from "@supabase/supabase-js";
+import { supabase } from "./database.js";
 import { exec } from "child_process";
 import dotenv from "dotenv";
 import multer from "multer";
@@ -23,14 +23,36 @@ import { maybeNotifyForPpe, sendManualEmail, sendManualSms } from "./notificatio
 
 dotenv.config();
 
+const FLASK_URL = process.env.FLASK_URL || `http://localhost:${process.env.FLASK_PORT || 5001}`;
+
+async function notifyFlaskReloadEmbeddings() {
+    try {
+        const response = await fetch(`${FLASK_URL}/api/embeddings/reload`, { method: "POST" });
+        if (!response.ok) {
+            console.warn(`[EMBEDDINGS] Flask reload failed: HTTP ${response.status}`);
+            return;
+        }
+        const data = await response.json();
+        console.log(
+            `[EMBEDDINGS] Flask reloaded ${data.embeddings_count} embedding(s) for ${(data.persons || []).join(", ") || "none"}`
+        );
+    } catch (err) {
+        console.warn(`[EMBEDDINGS] Could not notify Flask to reload embeddings: ${err.message}`);
+    }
+}
+
+function isMissingDetectionEventsTable(error) {
+    if (!error) return false;
+    if (error.code === "PGRST205") return true;
+    const message = error.message || "";
+    return message.includes("detection_events") && (
+        message.includes("does not exist") || message.includes("Could not find the table")
+    );
+}
+
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-// Supabase Connection
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Middleware
 app.use(cors());
@@ -186,11 +208,11 @@ app.post("/register", upload.array("profilePhotos"), async (req, res) => {
                     const embeddingsPath = path.join(uploadFolder, 'embeddings.csv');
                     if (fs.existsSync(embeddingsPath)) {
                         console.log(`[EMBEDDINGS SUCCESS] Embeddings file created: ${embeddingsPath}`);
+                        notifyFlaskReloadEmbeddings().finally(resolve);
                     } else {
                         console.error(`[EMBEDDINGS ERROR] Embeddings file NOT created at: ${embeddingsPath}`);
+                        resolve();
                     }
-                    
-                    resolve();
                 });
             });
         }
@@ -413,13 +435,13 @@ app.post("/api/admin/add-employee", authenticateToken, upload.array("profilePhot
                         const stats = fs.statSync(embeddingsPath);
                         console.log(`[EMBEDDINGS SUCCESS] Embeddings file created: ${embeddingsPath}`);
                         console.log(`[EMBEDDINGS SUCCESS] File size: ${stats.size} bytes`);
+                        notifyFlaskReloadEmbeddings().finally(resolve);
                     } else {
                         console.error(`[EMBEDDINGS ERROR] Embeddings file NOT created at: ${embeddingsPath}`);
                         console.error(`[EMBEDDINGS ERROR] Please check if Python script ran successfully`);
                         console.error(`[EMBEDDINGS ERROR] Try running manually: ${command}`);
+                        resolve();
                     }
-                    
-                    resolve(); // Always resolve, don't fail the employee addition
                 });
             });
         } else {
@@ -536,9 +558,8 @@ app.post("/api/detections/event", async (req, res) => {
         }
 
         if (upsertError) {
-            // If table doesn't exist, log warning but don't fail
-            if (upsertError.message && upsertError.message.includes("does not exist")) {
-                console.warn("[DETECTION EVENT] Table not found. Run migration: add_detection_events.sql");
+            if (isMissingDetectionEventsTable(upsertError)) {
+                console.warn("[DETECTION EVENT] Table not found. Run backend/migrations/add_detection_events.sql in Supabase.");
                 return res.status(200).json({ message: "Detection event skipped (table not found)" });
             }
             console.error("[DETECTION EVENT] Upsert error:", upsertError);
@@ -601,9 +622,8 @@ app.get("/api/detections/recent", authenticateToken, async (req, res) => {
             .limit(limit);
 
         if (error) {
-            // If table doesn't exist, return empty array
-            if (error.message && error.message.includes("does not exist")) {
-                console.warn("[RECENT DETECTIONS] Table not found. Run migration: add_detection_events.sql");
+            if (isMissingDetectionEventsTable(error)) {
+                console.warn("[RECENT DETECTIONS] Table not found. Run backend/migrations/add_detection_events.sql in Supabase.");
                 return res.status(200).json([]);
             }
             console.error("[RECENT DETECTIONS] Error:", error);

@@ -82,40 +82,49 @@ else:
     print("[VIDEO SERVER] To train the model, run: python train_ppe_model.py")
     ppe_model = load_ppe_model()
 
-# Load embeddings
+# Load face recognition embeddings from backend/uploads
 all_embeddings = []
 all_names = []
+index = None
 
-# Resolve UPLOADS_FOLDER to absolute path for cross-platform compatibility
 UPLOADS_FOLDER_ABS = os.path.abspath(UPLOADS_FOLDER)
-print(f"[VIDEO SERVER] Loading embeddings from: {UPLOADS_FOLDER_ABS}")
-print(f"[VIDEO SERVER] Folder exists: {os.path.exists(UPLOADS_FOLDER_ABS)}")
 
-if not os.path.exists(UPLOADS_FOLDER_ABS):
-    print(f"[VIDEO SERVER] ERROR: Uploads folder does not exist: {UPLOADS_FOLDER_ABS}")
-    print(f"[VIDEO SERVER] Please ensure the backend/uploads directory exists")
+
+def load_embeddings():
+    """Load or reload face embeddings from backend/uploads/*/embeddings.csv"""
+    global all_embeddings, all_names, index
+
+    all_embeddings = []
+    all_names = []
     index = None
-else:
+
+    print(f"[VIDEO SERVER] Loading embeddings from: {UPLOADS_FOLDER_ABS}")
+    print(f"[VIDEO SERVER] Folder exists: {os.path.exists(UPLOADS_FOLDER_ABS)}")
+
+    if not os.path.exists(UPLOADS_FOLDER_ABS):
+        print(f"[VIDEO SERVER] ERROR: Uploads folder does not exist: {UPLOADS_FOLDER_ABS}")
+        return
+
     try:
         person_folders = os.listdir(UPLOADS_FOLDER_ABS)
         print(f"[VIDEO SERVER] Found {len(person_folders)} folders in uploads directory")
-        
+
         for person_folder in person_folders:
             full_path = os.path.join(UPLOADS_FOLDER_ABS, person_folder)
             if not os.path.isdir(full_path):
                 continue
-                
+
             csv_path = os.path.join(full_path, 'embeddings.csv')
             if not os.path.exists(csv_path):
                 print(f"[VIDEO SERVER] WARNING: No embeddings.csv found for {person_folder}")
                 continue
-            
+
             try:
                 df = pd.read_csv(csv_path, header=None)
                 if df.empty:
                     print(f"[VIDEO SERVER] WARNING: Empty embeddings.csv for {person_folder}")
                     continue
-                    
+
                 for _, row in df.iterrows():
                     known_embedding = row.values.astype(float)
                     known_embedding = normalize([known_embedding])[0]
@@ -126,24 +135,24 @@ else:
                 print(f"[VIDEO SERVER] ERROR loading embeddings for {person_folder}: {e}")
                 import traceback
                 traceback.print_exc()
-                continue
 
         if all_embeddings:
-            all_embeddings = np.array(all_embeddings).astype('float32')
+            all_embeddings_array = np.array(all_embeddings).astype('float32')
             index = NearestNeighbors(n_neighbors=1, metric='cosine', algorithm='brute')
-            index.fit(all_embeddings)
+            index.fit(all_embeddings_array)
             unique_names = set(all_names)
             print(f"[VIDEO SERVER] ✅ Loaded {len(all_embeddings)} embeddings from {len(unique_names)} person(s)")
             print(f"[VIDEO SERVER] ✅ Recognizable persons: {', '.join(sorted(unique_names))}")
         else:
-            index = None
             print("[VIDEO SERVER] ⚠️  WARNING: No embeddings found! Face recognition will not work.")
-            print("[VIDEO SERVER] ⚠️  Make sure employees have been added with profile photos and embeddings were generated.")
+            print("[VIDEO SERVER] ⚠️  Register employees with profile photos, then reload embeddings.")
     except Exception as e:
         print(f"[VIDEO SERVER] ERROR loading embeddings: {e}")
         import traceback
         traceback.print_exc()
-        index = None
+
+
+load_embeddings()
 
 # RTSP URL - password contains @ which needs URL encoding: @ becomes %40
 # Format: rtsp://username:password@ip:port/path?rtsp_transport=tcp
@@ -699,6 +708,18 @@ def health_check():
         }
     })
 
+
+@app.route('/api/embeddings/reload', methods=['POST'])
+def reload_embeddings():
+    """Reload face embeddings after new employees register"""
+    load_embeddings()
+    return jsonify({
+        "status": "ok",
+        "embeddings_count": len(all_embeddings),
+        "face_recognition_ready": index is not None,
+        "persons": sorted(set(all_names)),
+    })
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -1175,14 +1196,35 @@ def cleanup_detection_snapshots():
             import traceback
             traceback.print_exc()
 
+def resolve_flask_port():
+    """Pick a free port; FLASK_PORT env overrides auto-selection."""
+    import socket
+
+    env_port = os.getenv('FLASK_PORT')
+    if env_port:
+        return int(env_port)
+
+    for port in (5000, 5001, 5050):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(('0.0.0.0', port))
+                return port
+            except OSError:
+                continue
+    return 5001
+
+
 if __name__ == '__main__':
+    flask_port = resolve_flask_port()
+
     print("\n" + "="*60)
     print("[VIDEO SERVER] Starting Flask video server...")
     print(f"[VIDEO SERVER] Models loaded:")
     print(f"  - Face Recognition: {'✓' if index is not None else '✗'} ({len(all_embeddings)} embeddings)")
     print(f"  - PPE Detection: {'✓' if ppe_model is not None else '✗'}")
     print(f"[VIDEO SERVER] RTSP URL: rtsp://admin:***@192.168.1.216:554/101")
-    print(f"[VIDEO SERVER] Server will run on: http://0.0.0.0:5000")
+    print(f"[VIDEO SERVER] Server will run on: http://0.0.0.0:{flask_port}")
     print(f"[VIDEO SERVER] Camera will NOT auto-start - use /api/camera/start from web app")
     print("="*60 + "\n")
     
@@ -1191,5 +1233,5 @@ if __name__ == '__main__':
     cleanup_thread.start()
     print(f"[CLEANUP] Started background cleanup thread - will clear {DETECTION_SNAPSHOTS_FOLDER} every minute\n")
     
-    app.run(host='0.0.0.0', port=5000, threaded=True, debug=True)
+    app.run(host='0.0.0.0', port=flask_port, threaded=True, debug=True)
 

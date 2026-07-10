@@ -6,12 +6,13 @@
 CREATE TABLE IF NOT EXISTS detection_events (
     id SERIAL PRIMARY KEY,
     worker_id TEXT,
-    worker_name TEXT NOT NULL UNIQUE, -- UNIQUE: Only one entry per person, updates timestamp on new detection
+    worker_name TEXT NOT NULL UNIQUE,
     confidence FLOAT,
     ppe_compliant BOOLEAN,
     ppe_items JSONB,
     detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    camera_source TEXT -- 'rtsp' or 'webcam'
+    camera_source TEXT,
+    snapshot_path TEXT
 );
 
 -- Create indexes for faster queries
